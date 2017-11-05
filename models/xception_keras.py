@@ -1,3 +1,5 @@
+from warnings import warn
+_model_id = 'Xception'
 MAX_BLOCK = 14 # xception max block=14
 def model_init(input_shape,**kwargs):
     from keras.applications import Xception
@@ -7,14 +9,23 @@ def model_init(input_shape,**kwargs):
     set_image_data_format('channels_last')
 
     fix_base = kwargs.pop('fix_base',True)
+    if not fix_base:
+        warn('%s model fix_base=False, training may take a long time'%_model_id)
+    
     max_block = kwargs.pop('max_block',MAX_BLOCK) 
 
     base_model = Xception(weights="imagenet", include_top=False,
                           pooling="avg", input_shape=input_shape)
+
+    n_layers = len(base_model.layers)
+    max_layer = kwargs.pop('max_layer',n_layers)
+    max_layer = min(n_layers,max_layer) if max_layer>0 else n_layers+max_layer
+
+    base_model.layers = base_model.layers[:max_layer]
+    
     if fix_base:
-        print('Fixing Xceptionv1 base_model layers up to block %d'%max_block)
+        print('Fixing %s base_model layers'%_model_id)
         # first: train only the top layers (which were randomly initialized)
-        # i.e. freeze all convolutional InceptionV3 layers
         trainable = False # fix blocks until we hit max_block
         for i,layer in enumerate(base_model.layers):
             lname = layer.name

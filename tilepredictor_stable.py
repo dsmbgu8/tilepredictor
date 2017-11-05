@@ -4,7 +4,7 @@ from __future__ import division, print_function, absolute_import, unicode_litera
 import sys
 from glob import glob
 
-from util.aliases import *
+from pylib import *
 
 tilepredictor_home = pathsplit(__file__)[0]
 sys.path.append(abspath(tilepredictor_home))

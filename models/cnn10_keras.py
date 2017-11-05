@@ -29,26 +29,51 @@ def model_init(input_shape,**kwargs):
     model.add(MaxPooling2D(pool_size=(2,2)))
     model.add(SpatialDropout2D(0.1))
     
-    model.add(Convolution2D(36,(2,2)))
+    model.add(Convolution2D(24,(2,2)))
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2,2)))
-    model.add(SpatialDropout2D(0.2))
-    
-    model.add(Convolution2D(48,(2,2)))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(2,2)))
-    model.add(SpatialDropout2D(0.3))
+    model.add(SpatialDropout2D(0.1))
 
-    model.add(Convolution2D(64,(2,2)))
+    model.add(Convolution2D(30,(2,2)))
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2,2)))    
-    model.add(SpatialDropout2D(0.4))
+    model.add(SpatialDropout2D(0.2))
 
+    model.add(Convolution2D(36,(2,2)))
+    model.add(Activation('relu'))
+    model.add(MaxPooling2D(pool_size=(2,2)))    
+    model.add(SpatialDropout2D(0.2))
+
+    model.add(Convolution2D(42,(2,2)))
+    model.add(Activation('relu'))
+    model.add(MaxPooling2D(pool_size=(2,2)))    
+    model.add(SpatialDropout2D(0.3))
+
+    model.add(Convolution2D(48,(2,2)))
+    model.add(Activation('relu'))
+    model.add(MaxPooling2D(pool_size=(2,2)))    
+    model.add(SpatialDropout2D(0.3))      
+
+    model.add(Convolution2D(54,(2,2)))
+    model.add(Activation('relu'))
+    model.add(MaxPooling2D(pool_size=(2,2)))    
+    model.add(SpatialDropout2D(0.4))      
+
+    model.add(Convolution2D(60,(2,2)))
+    model.add(Activation('relu'))
+    model.add(MaxPooling2D(pool_size=(2,2)))    
+    model.add(SpatialDropout2D(0.4))      
+
+    model.add(Convolution2D(66,(2,2)))
+    model.add(Activation('relu'))
+    model.add(MaxPooling2D(pool_size=(2,2)))    
+    model.add(SpatialDropout2D(0.5))      
+    
     model.add(Convolution2D(72,(2,2)))
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2,2)))    
-    model.add(SpatialDropout2D(0.5))    
-
+    model.add(SpatialDropout2D(0.5))      
+    
     model.add(Flatten())
     model.add(Dense(1000))
     model.add(Activation('relu'))

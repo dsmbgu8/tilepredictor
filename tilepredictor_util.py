@@ -93,9 +93,9 @@ def imread_tile(f,tile_shape,resize='resize',dtype=np.uint8,verbose=0):
         coff = tile.shape[1]-tile_shape[1]
         r = 0 if roff<0 else randint(roff)
         c = 0 if coff<0 else randint(coff)
-        print('before',tile.shape)
+        print('before extract',tile.shape)
         tile = extract_tile(tile,(r,c),tile_shape[0])
-        print(tile.shape)
+        print('after extract',tile.shape)
     elif resize=='crop':
         tile = imcrop(tile,tile_shape)
 
@@ -111,16 +111,16 @@ def imread_tile(f,tile_shape,resize='resize',dtype=np.uint8,verbose=0):
         print('Output type=%s, range = [%.3f, %.3f]'%(str(otype),omin,omax))    
     return tile
 
-def imread_image(f,image_bands=3,dtype=np.uint8,verbose=0):
+def imread_image(f,bands=3,dtype=np.uint8,verbose=0):
     print('Loading image',f)
     image = imread(f)
     itype = image.dtype
     if verbose:
         imin,imax = extrema(image.ravel())
 
-    if image.ndim==3 and image.shape[2]==4:
+    if image.ndim==3 and image.shape[2]==4 and bands!=4:
         image = image[:,:,:3]
-    assert(image.shape[2]==image_bands)
+    assert(image.shape[2]==bands)
     scalef=255 if itype==float else 1
     imgout = dtype(scalef*image)
     if verbose:
@@ -208,11 +208,64 @@ def mapinfo(img,astype=dict):
 
     return mapinfo
 
+def findhdr(img_file):
+    from os import path
+    dirname = path.dirname(img_file)
+    filename,filext = path.splitext(img_file)
+    if filext == '.hdr' and path.isfile(img_file): # img_file is a .hdr
+        return img_file
+    
+    hdr_file = img_file+'.hdr' # [img_file.img].hdr or [img_file].hdr
+    if path.isfile(hdr_file):
+        return path.abspath(hdr_file)
+    hdr_file = filename+'.hdr' # [img_file.img] -> [img_file].hdr 
+    if path.isfile(hdr_file):
+        return hdr_file
+    return None
+
 def openimg(imgf,hdrf=None,**kwargs):
     from spectral.io.envi import open as _open
     hdrf = hdrf or findhdr(imgf)
     return _open(hdrf,imgf,**kwargs)
 
+def get_imagelabs(imgid,lab_path,lab_pattern,verbose=False):
+    import os
+    from glob import glob
+    from os.path import join as pathjoin, exists as pathexists, splitext
+
+    lab_pattern = lab_pattern or '*'
+    
+    lab_files  = glob(pathjoin(lab_path,lab_pattern))
+    msgtup=(imgid,lab_path,lab_pattern)
+    if len(lab_files)==0:
+        warn('No label image for "%s" in "%s" matching pattern "%s"'%msgtup)
+        return []
+    labf = lab_files[0]
+    if len(lab_files)>1:
+        labf = None
+        for lab_file in lab_files:
+            if imgid in lab_file:
+                labf = lab_file
+                break
+        if not labf:
+            warn('No lab for "%s" in "%s" matching pattern "%s"'%msgtup)
+            return []
+        
+        msg = 'Multiple label files for "%s" in "%s" matching pattern "%s"'%msgtup
+        msg += ', using file "%s"'%labf
+        warn(msg)
+
+    try:
+        if labf.endswith('.png'):
+            labimg = imread_image(labf,bands=4,dtype=np.uint8,verbose=0)
+        else:    
+            labimg = openimg(labf).load().squeeze()
+    except:
+        warn('Unable to read label image "%s"'%labf)
+        labimg = []
+
+    return labimg
+            
 def get_imagemap(imgid,hdr_path,hdr_pattern,verbose=False):
     import os
     from glob import glob
@@ -223,14 +276,23 @@ def get_imagemap(imgid,hdr_path,hdr_pattern,verbose=False):
         return None
     
     # remove .hdr from suffix if it's there
-    hdr_paths  = glob(pathjoin(hdr_path,hdr_pattern))
+    hdr_files  = glob(pathjoin(hdr_path,hdr_pattern))
     msgtup=(imgid,hdr_path,hdr_pattern)
-    if len(hdr_paths)==0:
-        warn('no hdr for "%s" in "%s" matching pattern "%s"'%msgtup)
+    if len(hdr_files)==0:
+        warn('No hdr for "%s" in "%s" matching pattern "%s"'%msgtup)
         return None
-    hdrf = hdr_paths[0]
-    if len(hdr_paths)>1:
-        msg = 'multiple .hdr files for "%s" in "%s" matching pattern "%s"'%msgtup
+    hdrf = hdr_files[0]
+    if len(hdr_files)>1:
+        hdrf = None
+        for hdr_file in hdr_files:
+            if imgid in hdr_file:
+                hdrf = hdr_file
+                break
+        if not hdrf:
+            warn('No hdr for "%s" in "%s" matching pattern "%s"'%msgtup)
+            return None
+        
+        msg = 'Multiple .hdr files for "%s" in "%s" matching pattern "%s"'%msgtup
         msg += ', using file "%s"'%hdrf
         warn(msg)
     imgf = hdrf.replace('.hdr','')
@@ -263,3 +325,66 @@ def array2rgba(a,**kwargs):
     else:
         rgba = np.zeros(list(a.shape)+[4],dtype=uint8)
     return rgba
+
+counts = lambda a: dict(zip(*np.unique(a,return_counts=True)))
+def randperm(*args):
+    from numpy.random import permutation
+    n = args[0]
+    k = n if len(args) < 2 else args[1] 
+    return permutation(n)[:k]
+
+def balance_classes(y,**kwargs):
+    verbose = kwargs.get('verbose',False)
+    ulab = np.unique(y)
+    K = len(ulab)
+    yc = counts(y)
+    nsamp_tomatch = max(yc.values())
+    balance_idx = np.array([])
+    if verbose:
+        print('Total (unbalanced) samples: %d\n'%len(y))
+
+    for j in range(K):
+        idxj = np.where(y==ulab[j])[0]
+        nj = len(idxj)
+        naddj = nsamp_tomatch-nj
+        addidxj = idxj[np.random.randint(0,nj-1,naddj)]
+        if verbose:
+            print('Balancing class %d with %d additional samples\n'%(ulab[j],
+                                                                     naddj))
+        balance_idx = addidxj if j==0 else np.r_[balance_idx, addidxj]
+
+    return balance_idx
+
+def augment_batch(X_batch,y_batch,batch_idx,transform=None):
+    """
+    augment_batch(X_batch,y_batch,batch_idx,transform=None)
+    
+    Summary: resamples X_batch,y_batch with replacement to generate a new
+    set with the same number of samples as batch_idx
+    
+    Arguments:
+    - X_batch: n input data samples
+    - y_batch: n input labels for X_batch
+    - batch_idx: batch_size x 1 array of valid batch indices
+    
+    Keyword Arguments:
+    - transform: function to transform each sample in X_batch
+    
+    Output:
+    - X_aug: batch_size output samples
+    - y_aug: batch_size output labels for X_aug
+    
+    """
+    
+    if transform is None:
+        transform = lambda x: x
+    batch_size,n_bi = len(batch_idx),len(y_batch)
+    n_aug = batch_size-n_bi
+    aug_idx = batch_idx % n_bi
+    bal_idx = balance_classes(y_batch[aug_idx],verbose=False)
+    aug_idx = np.r_[aug_idx[bal_idx],aug_idx]
+    aug_idx = aug_idx[randperm(len(aug_idx),n_aug)]
+    X_aug = np.r_[X_batch,map(transform,X_batch[aug_idx])]
+    y_aug = np.r_[y_batch,y_batch[aug_idx]]
+
+    return X_aug,y_aug

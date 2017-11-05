@@ -6,29 +6,7 @@ from os.path import exists as pathexists
 import numpy as np
 from skimage.io import ImageCollection, imread as skimread 
 
-counts = lambda a: dict(zip(*np.unique(a,return_counts=True)))
-
-def balance_classes(y,**kwargs):
-    verbose = kwargs.get('verbose',False)
-    ulab = np.unique(y)
-    K = len(ulab)
-    yc = counts(y)
-    nsamp_tomatch = max(yc.values())
-    balance_idx = np.array([])
-    if verbose:
-        print('Total (unbalanced) samples: %d\n'%len(y))
-
-    for j in range(K):
-        idxj = np.where(y==ulab[j])[0]
-        nj = len(idxj)
-        naddj = nsamp_tomatch-nj
-        addidxj = idxj[np.random.randint(0,nj-1,naddj)]
-        if verbose:
-            print('Balancing class %d with %d additional samples\n'%(ulab[j],
-                                                                     naddj))
-        balance_idx = addidxj if j==0 else np.r_[balance_idx, addidxj]
-
-    return balance_idx
+from tilepredictor_util import *
 
 def _load_path(labelf,nmax=np.inf,asarray=False,load_func=None,check_path=False,
                conserve_memory=True,memory_slots=1,transpose=None,
@@ -108,23 +86,25 @@ def load_data(*args,**kwargs):
     return X_train,y_train,X_test,y_test
 
 if __name__ == '__main__':
-    import sys
+    import sys    
     import pylab as pl
-
+    
     from tilepredictor import imread_tile
-    from model_package import collect_batch, perturb_batch
-    from keras.utils.np_utils import to_categorical 
+    from model_package import collect_batch, imaugment_perturb, batch_datagen_params 
+    #from keras.utils.np_utils import to_categorical 
+    #from keras.preprocessing.image import ImageDataGenerator
     
     basepath=sys.argv[1]
+    # basepath='/Users/bbue/Research/ARIA/iceberg/iceberg'
     # basepath='/lustre/bbue/ch4/srcfinder/tiles/thompson_training/256/ang20150419t163741_det'#ang20150421t181252
     # basepath='/lustre/bbue/ch4/srcfinder/tiles/thompson_training/256/ang20150419t163741_det'
     # basepath='/lustre/bbue/ch4/srcfinder/tiles/thompson_training/224/ang20150419t163741'
     # basepath='/lustre/bbue/ch4/srcfinder/tiles/thorpe_training/256/ang20160910t182946_det_notn'
     # basepath='/lustre/bbue/ch4/srcfinder/tiles/thorpe_training/256/ang20160910t182946_det_notn'
-
     trainf = basepath+'_train.txt'
     testf = basepath+'_test.txt'
-    tile_shape = [200,200]
+
+    tile_shape = [75,75] #[200,200]
     
     load_func = lambda imgf: imread_tile(imgf,tile_shape=tile_shape)
     loadargs = (trainf,testf)
@@ -134,6 +114,63 @@ if __name__ == '__main__':
 
     X_train,y_train,_,_ = load_data(*loadargs,**loadkwargs)
     pos_idx,neg_idx = np.where(y_train==1)[0],np.where(y_train==0)[0]
+
+    image_files = np.array(X_train.files)
+    flights = np.array([Xi.split('/')[-3] for Xi in image_files])    
+    flights_uniq = np.unique(flights)
+    for i,flighti in enumerate(flights_uniq):
+        fmaski = flights==flighti
+        yi = y_train[fmaski]
+        fpos,fneg = np.count_nonzero(yi==1),np.count_nonzero(yi==0)
+        fn = fpos+fneg
+        print(', '.join([flighti,fpos,fneg,fn]))
+        if fn<50:
+            print(image_files[fmaski]),raw_input()
+    
+    datagen = ImageDataGenerator(**batch_datagen_params)
+
+    datagen.fit(X_train,seed=42)
+    
+    epochs=5
+    batch_size = 500
+    batch_idx = np.arange(batch_size,dtype=int)
+    batches = 0
+    n_batches = len(X_train) / batch_size
+    flowkw = dict(batch_size=batch_size,shuffle=True,seed=42,
+                  save_to_dir=None,save_prefix='',save_format='png')
+    random_transform = datagen.random_transform
+    for e in range(epochs):
+        print('Epoch', e)
+        batches = 0
+        for X_batch, y_batch in datagen.flow(X_train, y_train, **flowkw):
+            n_bi = X_batch.shape[0]
+            if n_bi < batch_size:
+                n_aug = batch_size-n_bi
+                aug_idx = batch_idx[randperm(batch_size)] % n_bi
+                bal_idx = balance_classes(y_batch[aug_idx],verbose=True)
+                aug_idx = np.r_[aug_idx,aug_idx[bal_idx]]
+                aug_idx = aug_idx[randperm(len(aug_idx),n_aug)]
+                X_aug = map(random_transform,X_batch[aug_idx])
+                y_aug = y_batch[aug_idx]
+                X_batch = np.r_[X_batch,X_aug]
+                y_batch = np.r_[y_batch,y_aug]
+
+            #model.fit(x_batch, y_batch)
+            print("Batch",batches,X_batch.shape)
+            
+            fig,ax = pl.subplots(1,3,sharex=True,sharey=True)
+            ax[0].imshow(X_batch[-3])
+            ax[1].imshow(X_batch[-1])
+            ax[2].imshow(X_batch[-2])
+            pl.show()
+            batches += 1
+            if batches >= n_batches:
+                # we need to break the loop by hand because
+                # the generator loops indefinitely
+                break
+            
+    print('Done at',batches,'batches'), raw_input()
+    
     print(y_train.shape,len(pos_idx),len(neg_idx))
     X_train,y_train = X_train[::15],y_train[::15]
     pos_idx,neg_idx = np.where(y_train==1)[0],np.where(y_train==0)[0]
@@ -153,7 +190,7 @@ if __name__ == '__main__':
                                     batch_idx=batch_idx)
 
 
-    X_train_batch,y_train_batch = perturb_batch(X_batch,y_batch,
+    X_train_batch,y_train_batch = imaugment_perturb(X_batch,y_batch,
                                                 naugpos=naugpos,
                                                 naugneg=naugneg)
     pos_idx,neg_idx = np.where(np.argmax(y_train_batch,-1)==1)[0],\

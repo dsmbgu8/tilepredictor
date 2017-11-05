@@ -1,19 +1,24 @@
-from __future__ import division, print_function, absolute_import, unicode_literals
+from __future__ import absolute_import, division, print_function, unicode_literals
 import sys
 import time
 gettime = time.time
 
-from util.aliases import *
+from pylib import *
 
-#sys.path.insert(0,expanduser('~/Downloads/keras2/build/lib/'))
-#sys.path.insert(0,expanduser('~/Downloads/keras204/build/lib/'))
-sys.path.insert(0,expanduser('~/Research/src/python/external/keras204/build/lib/'))
-sys.path.insert(1,expanduser('~/Research/src/python/external/keras-multiprocess-image-data-generator'))
+pyext=expanduser('~/Research/src/python/external')
+#sys.path.insert(0,pathjoin(pyext,'keras2/build/lib'))
+sys.path.insert(0,pathjoin(pyext,'keras204/build/lib'))
+#sys.path.insert(0,pathjoin(pyext,'keras207/build/lib'))
+#sys.path.insert(0,pathjoin(pyext,'keras208/build/lib'))
+sys.path.insert(0,pathjoin(pyext,'keras-multiprocess-image-data-generator'))
+sys.path.insert(0,pathjoin(pyext,'CLR'))
 
-from util.aliases.dnn import *
+from pylib.dnn import *
 
 from keras.utils.np_utils import to_categorical
-from keras.callbacks import Callback
+from keras.callbacks import Callback, TerminateOnNaN, EarlyStopping, \
+    ModelCheckpoint, ReduceLROnPlateau, CSVLogger, TensorBoard
+from clr_callback import CyclicLR
 
 from tilepredictor_util import *
 
@@ -22,41 +27,67 @@ valid_packages = ['keras']
 model_path = pathjoin(tilepredictor_path,'models')
 valid_flavors = []
 for pkg in valid_packages:
-    model_list = glob(pathjoin(model_path,'*'+pkg+'*.py'))
-    valid_flavors.extend([pathsplit(modelpath)[1].split('_')[0]
-                          for modelpath in model_list])
+    for path in glob(pathjoin(model_path,'*'+pkg+'*.py')):
+        model_dir,flavor_file = pathsplit(path)
+        valid_flavors.append(flavor_file.split('_')[0])
+                          
 valid_flavors = list(set(valid_flavors))
 
 default_package   = valid_packages[0]
 default_flavor    = valid_flavors[0]
-default_state_dir = './state'
-
-# network architecture / training parameters
-nb_classes = 2 # we currently only consider binary classification problems 
-nb_hidden = 1024
-nb_epochs = 10000
-random_state = 42
-max_norm = np.inf # 5.0
-obj_lambda2 = 0.0025
+default_state_dir = './state/'
 
 # optimizer parameters
+nb_workers = 1
+nb_epochs = 10000
+batch_size = 256
+random_state = 42
 tol = 1e-8
 optparams = dict(
-    init_lr = 0.002,
-    min_lr = tol,
-    weight_decay = 0.004,
-    lr_reduce= 0.2,
+    init_lr = 0.001,
+    min_lr = 1e-6,
+    weight_decay = 1e-6,
+    lr_reduce = 0.1,
     beta_1 = 0.9,
     beta_2 = 0.999,
+    clr_base = 0.0001,
+    clr_max = 0.002,
+    clr_step = 500,
+    obj_lambda2 = 0.0025,
+    max_norm = np.inf, # 5.0
     tol = tol
 )
 
-batch_transform_params = dict(
-    zoom_range = (1.0, 1.1),
-    rotation_range = (0., 180.),
-    shear_range = (-10., -10.),
-    translation_range = (-10, 10),
+batch_rot_range=180.0
+batch_shear_range=10.0 # shear degrees
+batch_shift_range=0.1 # percentage of rows/cols to shift
+batch_zoom_range=0.1 # range = (1-zoom,1+zoom)
+batch_imaugment_params = dict(
+    zoom_range = (1.0-batch_zoom_range, 1.0+batch_zoom_range),
+    rotation_range = (-batch_rot_range, batch_rot_range),
+    shear_range = (-batch_shear_range, -batch_shear_range),
+    translation_range = (-batch_shift_range, batch_shift_range),
 )
+
+batch_datagen_params = dict(featurewise_center=False,
+                            samplewise_center=False,
+                            featurewise_std_normalization=False,
+                            samplewise_std_normalization=False,
+                            zca_whitening=False,
+                            zca_epsilon=tol,
+                            rotation_range=batch_rot_range,
+                            width_shift_range=batch_shift_range,
+                            height_shift_range=batch_shift_range,
+                            shear_range=np.deg2rad(batch_shear_range),
+                            zoom_range=batch_zoom_range,
+                            fill_mode='reflect',
+                            horizontal_flip=True,
+                            vertical_flip=True,
+                            rescale=None,
+                            preprocessing_function=None)
+
+datagen_fit_keys = ['zca_whitening','featurewise_center',
+                    'featurewise_std_normalization']
 
 msort = ['fscore','precision','recall']
 def compute_metrics(test_lab,pred_lab,pos_label=1,average='binary'):
@@ -231,9 +262,9 @@ def collect_batch(imgs,labs,batch_idx=[],imgs_out=[],labs_out=[]):
     return imgs_out,labs_out
 
 #@timeit
-def perturb_batch(*args,**kwargs):
+def imaugment_perturb(*args,**kwargs):
     from imaugment import perturb_batch as _pb
-    kwargs['train_params'] = batch_transform_params
+    kwargs['train_params'] = batch_imaugment_params
     return _pb(*args,**kwargs)
 
 class Model(object):
@@ -254,7 +285,8 @@ class Model(object):
         self.loadweights  = kwargs['load']
         self.compile      = kwargs['compile']
         self.preprocess   = preprocess_img_u8
-
+        self.start_epoch  = 0
+        
         if self.backend=='tensorflow':
             self.image_data_format = 'channels_last' 
             self.transpose = (0,1,2) # channels last=(0,1,2)=default
@@ -295,7 +327,7 @@ class Model(object):
             for i,m_id in enumerate(mispred_ids):
                 print('%s'%(str(m_id)),file=fid)
 
-    def generate_batches(self,X_train,y_train,n_batches,
+    def imaugment_batches(self,X_train,y_train,n_batches,
                          random_state=random_state):
         from sklearn.model_selection import StratifiedShuffleSplit        
         
@@ -322,17 +354,54 @@ class Model(object):
                                                     imgs_out=X_batch,
                                                     labs_out=y_batch)
 
-                    X_train_batch,y_train_batch = perturb_batch(X_batch,y_batch,
-                                                                imgs_out=X_train_batch,
-                                                                labs_out=y_train_batch)
+                    X_train_batch,y_train_batch = imaugment_perturb(X_batch,y_batch,
+                                                                    imgs_out=X_train_batch,
+                                                                    labs_out=y_train_batch)
 
                     yield X_train_batch.transpose(batch_transpose), y_train_batch
+                    
         except KeyboardInterrupt:
             if self.initialized:
                 print('User interrupt')
                 #print('saving model')
                 #out_weightf = train_weight_iterf%epoch
                 #self.save_weights(out_weightf)
+
+                
+    def datagen_batches(self,X_train,y_train,n_batches,
+                        random_state=random_state):
+        from keras.preprocessing.image import ImageDataGenerator        
+        batch_size = int(len(X_train)/n_batches)
+        batch_idx = np.arange(batch_size,dtype=int)        
+        batch_transpose = [0]+[i+1 for i in self.transpose]        
+        datagen = ImageDataGenerator(**batch_datagen_params)
+        flowkw = dict(batch_size=batch_size,shuffle=True,seed=random_state,
+                      save_to_dir=None,save_prefix='',save_format='png')
+        try:
+            bi = 0
+            # only fit datagen if one of the fit keys is true
+            do_fit = any([batch_datagen_params.get(key,False)
+                          for key in datagen_fit_keys])
+            if do_fit:
+                datagen.fit(X_train,seed=random_state)
+            transform = datagen.random_transform
+            for bi, (X_batch, y_batch) in enumerate(datagen.flow(X_train,
+                                                                 y_train,
+                                                                 **flowkw)):
+                if X_batch.shape[0] < batch_size:
+                    # fill a partial batch with balanced+transformed inputs
+                    X_batch,y_batch = augment_batch(X_batch,y_batch,batch_idx,
+                                                    transform=transform)
+
+                yield X_batch.transpose(batch_transpose), y_batch
+        
+        except KeyboardInterrupt:
+            if self.initialized:
+                print('User interrupt')
+                #print('saving model')
+                #out_weightf = train_weight_iterf%epoch
+                #self.save_weights(out_weightf)
+
                 
     def fit_generator(self,*args,**kwargs):
          return self.base.fit_generator(*args,**kwargs)
@@ -340,9 +409,7 @@ class Model(object):
     def train(self,X_train,y_train,X_test=[],y_test=[],
               nb_epochs=nb_epochs,**kwargs):
         
-        from keras.callbacks import TerminateOnNaN, EarlyStopping, \
-            ModelCheckpoint, ReduceLROnPlateau, CSVLogger, TensorBoard
-        
+        use_clr = kwargs.pop('use_clr',True)
         batch_size = kwargs.pop('batch_size',128)
         augment = kwargs.pop('augment',1.0)
         test_percent = kwargs.pop('test_percent',0.2)
@@ -357,7 +424,7 @@ class Model(object):
 
         # exit early if the last [stop_early] test scores are all worse than the best
         stop_early = kwargs.pop('stop_early',max(100,int(nb_epochs*0.2)))
-        lr_step = kwargs.pop('lr_step',max(10,int(nb_epochs*0.01)))
+        lr_step = kwargs.pop('lr_step',min(100,max(1,int(nb_epochs*0.01))))
 
         save_preds = kwargs.pop('save_preds',True)
         train_ids = kwargs.pop('train_ids',[])
@@ -391,7 +458,9 @@ class Model(object):
 
                 batch_transpose = [0]+[dimv+1 for dimv in self.transpose]
                 X_test = X_test.transpose(batch_transpose)
+
             validation_data = (X_test,y_test)
+            validation_steps = len(X_test)//batch_size
         else:
             print("Testing samples: 0")
             print('Testing classes: 0 neg, 0 pos')
@@ -399,6 +468,7 @@ class Model(object):
             n_neg,n_pos = 0,0
             val_monitor = val_monitor.replace('val_','')
             validation_data = None
+            validation_steps = None
 
             
         model_dir = self.model_dir
@@ -416,12 +486,21 @@ class Model(object):
                                   period=save_epoch, verbose=verbose)
         cp_cb = ModelCheckpoint(model_iterf,monitor=val_monitor,mode=val_mode, period=save_epoch,
                                 save_best_only=True, save_weights_only=False,                                
-                                save_first=False,verbose=False)
-        lr_cb = ReduceLROnPlateau(monitor=val_monitor, mode=val_mode,
-                                  patience=lr_step, min_lr=optparams['min_lr'],
-                                  factor=optparams['lr_reduce'],
-                                  epsilon=optparams['tol'],
-                                  verbose=verbose)
+                                verbose=False)
+        if use_clr:
+            lr_cb = CyclicLR(base_lr=optparams['clr_base'],
+                             max_lr=optparams['clr_max'],
+                             step_size=optparams['clr_step'])
+        else:
+            lr_cb = ReduceLROnPlateau(monitor=val_monitor,
+                                      mode=val_mode,
+                                      patience=lr_step,
+                                      min_lr=optparams['min_lr'],
+                                      factor=optparams['lr_reduce'],
+                                      epsilon=optparams['tol'],
+                                      verbose=verbose)
+
+        
         es_cb = EarlyStopping(monitor=val_monitor, patience=stop_early,
                               mode=val_mode, min_delta=0.01, verbose=verbose)
         tn_cb = TerminateOnNaN()
@@ -446,63 +525,50 @@ class Model(object):
                'batches/epoch=%d'%n_batches]
         print(', '.join(msg))
 
-        nb_workers = 1
-        batch_gen = self.generate_batches(X_train,y_train,n_batches)
-        self.fit_generator(batch_gen,n_batches,validation_data=validation_data,
+        #batch_gen = self.imaugment_batches(X_train,y_train,n_batches)
+        batch_gen = self.datagen_batches(X_train,y_train,n_batches)
+        self.fit_generator(batch_gen,n_batches,
+                           validation_data=validation_data,
+                           validation_steps=validation_steps,
                            epochs=nb_epochs,workers=nb_workers,
                            callbacks=cb_list,verbose=verbose)
 
         self.initialized = True
 
-def compile_model(input_shape,nb_classes,**params):
+def compile_model(input_shape,output_shape,**params):
+    import importlib
+    
+    nb_hidden,nb_classes = output_shape
+
     package   = params.pop('model_package',default_package)
     flavor    = params.pop('model_flavor',default_flavor)
     state_dir = params.pop('model_state_dir',default_state_dir)
     weightf   = params.pop('model_weightf',None)
-    
+
     if package not in valid_packages:
-        warn('Invalid model_package: %s (valid options=%s)'%(package,str(valid_packages)))
+        packages_str = str(valid_packages)
+        warn('Invalid model_package: "%s" (packages=%s)'%(package,packages_str))
         sys.exit(1)
 
     if flavor not in valid_flavors:
-        warn('Invalid model_flavor: %s (valid options=%s)'%(flavor,str(valid_flavors)))
+        flavors_str = str(valid_flavors)
+        warn('Invalid model_flavor: "%s" (flavors=%s)'%(flavor,flavors_str))
         sys.exit(1)
-        
-    if package=='keras':
-        import keras_model
-        load_model = keras_model.load_model
-        model_init = keras_model.model_init
-        update_base_outputs = keras_model.update_base_outputs
 
-        #  NOTE (BDB, 09/12/17): there must be a better way to do this... 
-        if flavor == 'cnn3':        
-            from models.cnn3_keras import model_init as init_flavor
-        elif flavor == 'cnn5':
-            from models.cnn5_keras import model_init as init_flavor
-        elif flavor == 'ffstn':
-            from models.ffstn_keras import model_init as init_flavor
-        elif flavor in ('inception','inceptionv3'):
-            from models.inception_keras import model_init as init_flavor
-        elif flavor in ('xception','xceptionv1'):
-            from models.xception_keras import model_init as init_flavor        
-    elif package=='lasagne':
-        import lasagne_model
-        load_model = lasagne_model.load_model
-        model_init = lasagne_model.lasagne_model
-        if flavor == 'cnn3':
-            from models.cnn3_lasagne import model_init as init_flavor        
-        elif flavor == 'ffstn':
-            from models.ffstn_lasagne import model_init as init_flavor
-
+    package_id  = "{package}_model".format(**locals())
+    flavor_id   = "models.{flavor}_{package}".format(**locals())    
+    package_lib = importlib.import_module(package_id)    
+    flavor_lib  = importlib.import_module(flavor_id)                    
     if weightf:
         print('Restoring existing model from file:',weightf)
-        model_base = load_model(weightf)        
+        model_base = package_lib.load_model(weightf)        
     else:
-        model_base = init_flavor(input_shape,**params)
-        model_base = update_base_outputs(model_base,nb_classes,nb_hidden,
-                                         obj_lambda2,max_norm)
+        model_base = flavor_lib.model_init(input_shape,**params)
+        model_base = package_lib.update_base_outputs(model_base,output_shape,
+                                                     optparams)
     
-    model_params = model_init(model_base,flavor,state_dir,optparams,**params)
+    model_params = package_lib.model_init(model_base,flavor,state_dir,
+                                          optparams,**params)
     model = Model(**model_params)
     
     if weightf:
