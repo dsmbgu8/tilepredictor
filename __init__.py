@@ -1,6 +1,13 @@
-from __future__ import absolute_import, print_function, division
+from __future__ import absolute_import, division, print_function
+import os, sys
 
-from .model_package import *
-from .tilepredictor import *
+tilepredictor_path = os.path.abspath(os.path.split(__file__)[0])
+sys.path.append(tilepredictor_path)
 
-__all__ = ["tilepredictor","model_package"]
+from tilepredictor_util import *
+from model_package import *
+from tilepredictor import *
+
+import load_data as _load_data
+load_image_data = _load_data.load_image_data
+load_data = _load_data.load_data
