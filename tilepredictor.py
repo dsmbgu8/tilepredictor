@@ -15,169 +15,15 @@ from model_package import *
 
 test_epoch = 1
 save_epoch = 1
+num_gpus = 1
 
-
-# softmax probs are:
-# [0.0,0.5] class 0
-# [0.5,1.0] class 1
-# by default, we map these to [0.0,0.5] and store the class label separately
-# scale_probs maps the [0.0,0.5] probs to [0.0,1.0] per class
-scale_probs = True
-randomize = False
-
-# network architecture / training parameters
-nb_hidden = 1024 # nodes in last FC layer before classification
-nb_classes = 2 # we currently only consider binary classification problems 
-output_shape = [nb_hidden,nb_classes]
-
-augment_size = [1,1]
-
-def collect_tile_uls(tile_path,tile_id='det',tile_ext='.png'):
-    """
-    collect_tile_files(imgid,tile_dir,tile_dim,tile_id,tile_ext=tile_ext)
-    
-    Summary: collect tiles and uls for precomputed path tile_dir
-    
-    Arguments:
-    - imgid: base image for precomputed tiles
-    - tile_dir: base tile directory, must be of the form:
-    
-        tile_path = tile_dir/tile_dim/imgid/tile_prefix
-    
-      ...and must contain filenames of the form:
-    
-        tile_file = *tile_id*tile_ext
-
-      e.g., bue_training/100/ang20160914t203630/fp/*det*.png
-            bue_training/120/ang20160914t203630/det/*rgb*.png
-    
-    - tile_dim: tile dimension
-    - tile_id: tile type identifier (e.g., det, rgb)
-    
-    Keyword Arguments:
-    - tile_ext: tile extension (default=.png)
-    
-    Output:
-    - output
-    """
-    
-    tile_files = []
-    if not tile_path:
-        return tile_files
-    elif not pathexists(tile_path):
-        warn('tile_dir "%s" not found'%tile_path)
-        return tile_files
-        
-    tile_pattern = '*'+tile_id+'*'+tile_ext    
-    for prefix in tile_prefix:        
-        load_pattern = pathjoin(tile_path,prefix,tile_pattern)
-        tile_files.extend(glob(load_pattern))
-
-    tile_uls = map(tilefile2ul,tile_files)
-    return tile_files, tile_uls
-
-def collect_image_uls(img_test,tile_dim,tile_stride):
-    from skimage.measure import label as imlabel
-    uls = set([])
-    nzmask = img_test[:,:,:3].any(axis=2)
-    if (~nzmask).all():
-        return uls
-    nzcomp = imlabel(nzmask, background=0, return_num=False, connectivity=2)    
-    nzrows,nzcols = nzmask.nonzero()
-    nzlabs = nzcomp[nzrows,nzcols]
-    ucomp,ucounts = np.unique(nzlabs,return_counts=True)        
-    
-    if tile_stride >= 1:
-        stride = tile_stride
-    else:
-        stride = max(1,tile_stride*tile_dim)
-        
-    stride = int(stride)
-    print('Collecting salience uls for',len(ucomp),
-          'nonzero components with stride=',stride,'pixels')
-
-    # offset by -1 pixel to 
-    tile_off = tile_dim-1
-    for ulab,unum in zip(ucomp,ucounts):
-        umask = nzlabs==ulab
-        urow,ucol = nzrows[umask],nzcols[umask]
-        rmin,rmax = urow.min()-tile_off,urow.max()+tile_off
-        cmin,cmax = ucol.min()-tile_off,ucol.max()+tile_off
-
-        # add center pixel for each ccomp by default
-        rmu,cmu = int(round(urow.mean())),int(round(ucol.mean()))
-        uls.add((rmu,cmu))
-        for r in range(rmin,rmax+stride,stride):
-            ri = min(r,rmax)
-            for c in range(cmin,cmax+stride,stride):
-                uls.add((ri,min(c,cmax)))
-
-        cstep = (cmax-cmin)/stride
-        rstep = (rmax-rmin)/stride
-        if rstep>1 or cstep>1:
-            print('Collected',len(uls),'tiles for component',ulab,'with',
-                  unum,'pixels, rstep=',rstep,'cstep=',cstep)
-
-    uls = np.int32(list(map(list,uls)))    
-    print(uls.shape[0],'total uls collected')
-    
-    return uls
-
-def generate_tiles(img_test,tile_uls,tile_dim):
-    for tile_ul in tile_uls:
-        tile_img = extract_tile(img_test,tile_ul,tile_dim,verbose=False)
-        if tile_img.any():
-            yield tile_img
-
-def generate_image_batch(img_test,tile_uls,tile_dim,batch_size,
-                         preprocess=None):
-    if preprocess is None:
-        preprocess = lambda Xi: Xi
-    n_test = len(tile_uls)
-    n_out = min(n_test,batch_size)
-    X_batch = np.zeros([n_out,tile_dim,tile_dim,3])
-    b_off = 0
-    while b_off < n_test:
-        b_end = min(b_off+batch_size,n_test)
-        print('Computing predictions for samples %d through %d'%(b_off,b_end))
-        b_i=0
-        while b_off < n_test and b_i < batch_size:
-            tile_img = extract_tile(img_test,tile_ul[b_off],tile_dim,verbose=False)
-            # note: the loader script should already preprocess each test sample
-            if tile_img.any():
-                X_batch[b_i] = preprocess(tile_img)
-                b_i += 1
-            b_off += 1
-        yield X_batch[:b_i]
-            
-def generate_test_batch(X_test,batch_size,preprocess=None):
-    if preprocess is None:
-        preprocess = lambda Xi: Xi
-
-    tile_dim = X_test[0].shape[0]
-    n_test = len(X_test)
-    n_out = min(n_test,batch_size)
-    X_batch = np.zeros([n_out,tile_dim,tile_dim,3])
-
-    b_off = 0
-    while b_off < n_test:
-        b_end = min(b_off+batch_size,n_test)
-        print('Computing predictions for samples %d through %d'%(b_off,b_end))
-        for i in range(b_off,b_end):
-            # note: the loader script should already preprocess each test sample
-            X_batch[i-b_off] = preprocess(X_test[i])
-        b_off += batch_size
-        yield X_batch
-
-def compute_predictions(model,X_test,n_classes,scale_probs=True):
-    pred_prob = model.predict(X_test)
-    pred_lab = np.int8(np.argmax(pred_prob,axis=-1))
-    pred_prob = np.amax(pred_prob,axis=-1)
-
-    if scale_probs:
-        pred_prob = 2*(pred_prob-0.5)
-
-    return dict(pred_lab=pred_lab,pred_prob=pred_prob)
+def import_load_func(module_func):
+    import importlib
+    print('Importing load_func:',module_func)
+    module,func = module_func.split('.')
+    func_lib = importlib.import_module(module)
+    load_func = getattr(func_lib, func)
+    return load_func
 
 def aximshow(ax,img,ylab,vmin=None,vmax=None,cmap=None):
     transpose = [1,0] if img.shape[0]>img.shape[1] else [0,1]
@@ -187,7 +33,7 @@ def aximshow(ax,img,ylab,vmin=None,vmax=None,cmap=None):
     ax.set_ylabel(ylab)
     return ret
 
-def plot_pred_images(img_data,pred_out,mapinfo=None,img_lab=[],
+def plot_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
                      output_dir=None,output_prefix='',
                      mask_zero=False,mask_prob=False,
                      mask_nodata=False,do_show=False):
@@ -286,15 +132,12 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,img_lab=[],
         img_prob[img_mask] = 0
         img_vcon[img_mask] = 0
         img_pcon[img_mask] = 0
-
-    if not pathexists(output_dir):
-        print('Creating output directory %s'%output_dir)
-        os.makedirs(output_dir)
         
     # save float32 envi images before converting to RGBA pngs 
     if output_dir is not None:
-        save_envi_output('pred',np.int16(img_pred),mapinfo)
         save_envi_output('prob',np.float32(img_prob),mapinfo)
+        save_envi_output('vcon',np.float32(img_vcon),mapinfo)
+        save_envi_output('pcon',np.float32(img_pcon),mapinfo)
         
     max_vote = max(abs(extrema(img_vote)))    
     
@@ -305,8 +148,8 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,img_lab=[],
     aximshow(ax[3],img_vcon,'vcon',vmin=-1.0,vmax=1.0)
     aximshow(ax[4],img_pcon,'pcon',vmin=-1.0,vmax=1.0)
 
-    if len(img_lab)!=0:
-        lab_mask = (img_lab>0)
+    if len(lab_mask)!=0:
+        lab_mask = (lab_mask>0)
         img_over = np.zeros([nrows,ncols,4])
         img_over[lab_mask, :] = [.4,.2,.6,.5]
         aximshow(ax[0],img_over,'test+labels')
@@ -318,156 +161,64 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,img_lab=[],
         img_prob = array2rgba(img_prob,  vmin=-1.0,vmax=1.0)
         img_vcon = array2rgba(img_vcon,  vmin=-1.0,vmax=1.0)
         img_pcon = array2rgba(img_pcon,  vmin=-1.0,vmax=1.0)        
-        save_png_output('vote',img_vote)
         save_png_output('pred',img_class)
+        save_png_output('prob',img_prob)        
         save_png_output('vcon',img_vcon)
-        save_png_output('prob',img_prob)
         save_png_output('pcon',img_pcon)
 
-def write_csv(csvf,imgid,pred_list,tile_dim,prob_thresh=0.0,imgmap=None):
+def write_csv(csvf,imgid,pred_list,tile_dim,prob_thresh=0.0,img_map=None):
     from LatLongUTMconversion import UTMtoLL
     # geolocate detections with .hdr files
     #tile_out = pred_out['pred_list']
-    
-    keep_mask = float32(pred_list[:,-2])>=prob_thresh
-    tile_keep = pred_list[keep_mask,:]
-    line,samp = np.float32(tile_keep[:,[1,2]]).T
-    preds,probs = tile_keep[:,-1],tile_keep[:,-2]    
 
-    if imgmap:        
-        zone,hemi = imgmap['zone'],imgmap['hemi']
+    header = ['imgid','line','samp','prob_pos']
+    assert(pred_list.shape[1]==len(header)-1)
+
+    keep_mask = float32(pred_list[:,-1])>=prob_thresh
+    if (~keep_mask).all():
+        warn('no detections with prediction probability >= %f'%prob_thresh)
+        return
+    
+    pred_keep = pred_list[keep_mask,:]
+    # offset line,samp by tile center
+    line,samp = (tile_dim//2)+np.float32(pred_keep[:,[1,2]]).T
+    probpos = pred_keep[:,-1]       
+    if img_map:        
+        zone,hemi = img_map['zone'],img_map['hemi']
         zonealpha = zone + ('N' if hemi=='North' else 'M')
+        header.extend(['lat','lon','utmx','utmy','zone','hemi'])
 
     outcsv = []
-    for i in range(tile_keep.shape[0]):
-        entryi = [imgid,'%d'%line[i],'%d'%samp[i],preds[i],probs[i]]
-        if imgmap:
-            utmx,utmy = sl2xy(samp[i],line[i],mapinfo=imgmap)
+    #sortv = (line*(samp.max()+1))+samp # sort by line,sample
+    sortv = -probpos # sort by descending probability
+    sorti = np.argsort(sortv)
+    for i in range(pred_keep.shape[0]):
+        entryi = [imgid,'%d'%line[i],'%d'%samp[i],probpos[i]]
+        if img_map:
+            utmx,utmy = sl2xy(samp[i],line[i],mapinfo=img_map)
             lat,lon = UTMtoLL(23,utmy,utmx,zonealpha)
-            entryi.extend(['%18.4f'%utmx,'%18.4f'%utmy,zone,hemi,lat[0],lon[0]])
+            entryi.extend([lat[0],lon[0],'%18.6f'%utmx,'%18.6f'%utmy,zone,hemi])
         outcsv.append(', '.join(map(lambda v: str(v).strip(),entryi)))
     outcsv = np.array(outcsv,dtype=str)
-    outcsv = outcsv[np.argsort((line*(samp.max()+1))+samp)]
-    with(open(csvf,'w')) as fid:
-        fid.write('\n'.join(list(outcsv))+'\n')
+    outcsv = outcsv[sorti]
+    with open(csvf,'w') as fid:
+        fid.write('\n'.join(['# '+', '.join(header)]+list(outcsv))+'\n')
     print('saved',csvf) 
 
-def compute_salience(model, img_test, tile_dim, tile_stride,
-                     output_dir, output_prefix, tile_dir=None, img_map=None,
-                     scale_probs=scale_probs, randomize=randomize,
-                     verbose=False, do_show=False):
-    
-    rows,cols = img_test.shape[:2]
-    img_pred = np.zeros([rows,cols,2],dtype=np.int32)
-    img_prob = np.zeros([rows,cols,2],dtype=np.float32)
-
-    rows,cols,bands = img_test.shape
-    if bands==4:        
-        img_rgb = img_test[...,:3]
-        img_mask = (img_test[...,-1]==0)
-    else:
-        img_rgb = img_test
-        img_mask = np.zeros([rows,cols],dtype=np.bool8)
-
-    if not tile_dir:
-        tile_uls = collect_img_uls(img_rgb,tile_dim,tile_stride)
-    else:
-        tile_files,tile_uls = collect_tile_uls(tile_dir)
-    n_tiles = len(tile_uls)
-        
-    if randomize:
-        tile_uls = tile_uls[randperm(n_tiles)]
-    
-    tile_gen = generate_tiles(img_rgb,tile_uls,tile_dim)
-    pmsg = 'Collecting model output'
-    print(pmsg+' for %d tiles'%n_tiles)
-    pbar = progressbar(pmsg,n_tiles)
-    pred_list = np.float32([n_tiles,4])
-    for i,tile_image in pbar(enumerate(tile_gen)):
-        tile_ul = tile_uls[i]
-        tile_rows = slice(tile_ul[0],tile_ul[0]+tile_dim,None)
-        tile_cols = slice(tile_ul[1],tile_ul[1]+tile_dim,None)
-
-        pred_input = model.preprocess(tile_image).transpose(model.transpose)
-        model_out = model.predict(pred_input[np.newaxis])[0]
-        tile_pred = np.int8(np.argmax(model_out,axis=-1))
-        tile_prob = np.amax(model_out,axis=-1) 
-
-        if i<3:
-            print('tile ul: "%s"'%str((tile_ul)))
-            for bi in range(pred_input.shape[-1]):
-                bmin,bmax=extrema(pred_input[...,bi].ravel())
-                print('band[%d] min=%.3f, max=%.3f'%(bi,bmin,bmax))            
-
-            tile_prob_scaled = 2*(tile_prob-0.5)
-            model_scaled = model_out.copy()
-            model_scaled[tile_pred] = tile_prob_scaled
-            model_scaled[1-tile_pred] = 1-tile_prob_scaled
-            print('tile_pred:            "%s"'%str((tile_pred)))
-            print('tile_prob (unscaled): "%s"'%str((tile_prob)))
-            print('tile_prob (scaled):   "%s"'%str((tile_prob_scaled)))
-            print('model_out (unscaled): "%s"'%str((model_out)))
-            print('model_out (scaled):   "%s"'%str((model_scaled)))
-
-        if scale_probs:
-            # probs originally in range [0.5,1.0]
-            tile_prob = 2*(tile_prob-0.5)
-            model_out[tile_pred] = tile_prob
-            model_out[1-tile_pred] = 1-tile_prob
-            
-        # increment the index of the predicted class for this tile location
-        img_pred[tile_rows,tile_cols,tile_pred] += 1
-
-        # also update the sum of probability scores 
-        img_prob[tile_rows,tile_cols,:] += model_out
-
-        # keep state for all of the predictions 
-        pred_list[i] = [tile_ul[0],tile_ul[1],tile_prob,tile_pred]
-
-    # get average probabilities for each class by normalizing by pred counts
-    for i in range(2):
-        predi = img_pred[...,i]
-        img_prob[...,i] /= np.float32(np.where(predi!=0,predi,1))
-    
-    pred_list = np.array(pred_list,dtype=np.float32)
-    pos_mask = pred_list[:,-1]==1
-    neg_mask = pred_list[:,-1]==0
-    npos = np.count_nonzero(pos_mask)
-    nneg = np.count_nonzero(neg_mask)
-    total = float(npos+nneg)
-    pos_probs = pred_list[pos_mask,-2]
-    neg_probs = pred_list[neg_mask,-2]
-    if npos!=0:
-        print('positive predictions:',npos,npos/total,'prob min/max/mean/std:',
-              pos_probs.min(),pos_probs.max(),pos_probs.mean(),pos_probs.std())
-    if nneg!=0:
-        print('negative predictions:',nneg,nneg/total,'prob min/max/mean/std:',
-              neg_probs.min(),neg_probs.max(),neg_probs.mean(),neg_probs.std())
-
-    if verbose:
-        print('\n'.join(map(lambda s: ' '.join(s),pred_list)))
-
-    pred_out = dict(pred_list=pred_list,img_pred=img_pred,
-                    img_prob=img_prob,img_mask=img_mask)
-
-    if output_dir:
-        if not pathexists(output_dir):
-            warn('Output dir "%s" not found'%output_dir)
-            return {}
-        
-        plot_pred_images(img_rgb,pred_out,mapinfo=img_map,img_lab=img_lab,
-                         output_dir=output_dir,output_prefix=output_prefix,
-                         mask_zero=False, do_show=do_show)
-        
-    return pred_out
-
-
-def image_salience(model, img_data, tile_dim, tile_stride,
-                   output_dir, output_prefix, img_map=None, img_lab=[],
-                   scale_probs=scale_probs, verbose=False,
-                   transpose=True, do_show=False):
+def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
+                   img_map=None, lab_mask=[], scale_probs=scale_probs,
+                   verbose=False, transpose=False, do_show=False):
     from skimage.util.shape import view_as_windows
-    
+    input_shape = model.layers[0].input_shape 
+    if model.backend=='tensorflow':
+        # channels last
+        tile_dim,tile_bands = input_shape[2],input_shape[3]
+    elif model.backend=='theano':
+        # channels first
+        tile_dim,tile_bands = input_shape[2],input_shape[1]
+
+    assert(tile_bands == img_data.shape[-1])
+        
     if tile_stride >= 1:
         stride = tile_stride
     else:
@@ -503,15 +254,19 @@ def image_salience(model, img_data, tile_dim, tile_stride,
     img_mask = np.zeros([rows,cols],dtype=np.bool8)
     if bands==4:        
         img_mask[img_test[...,-1]==0] = 1
- 
+        bands = 3
+        
     #ridx,cidx = map(lambda a: a.ravel(),np.meshgrid(range(cols),range(rows)))
     img_pred = np.zeros([rows,cols,2],dtype=np.int32)
     img_prob = np.zeros([rows,cols,2],dtype=np.float32)
 
-    input_win = (tile_dim,tile_dim,3)
+    tdims  = [tile_dim,tile_dim]
+    tshape = tdims+[bands]
+    rshape = [-1]+tshape
+    rtranspose = None
+    if model.transpose:
+        rtranspose = [0]+[d+1 for d in model.transpose]
 
-
-    half_dim = tile_dim//2
     rrange = np.arange(0,rows-tile_dim+1,stride)
     crange = np.arange(0,cols-tile_dim+1,stride)
     n_rb,n_cb = len(rrange),len(crange)
@@ -520,96 +275,102 @@ def image_salience(model, img_data, tile_dim, tile_stride,
                                                                          n_cb,
                                                                          tile_dim,
                                                                          stride))
+    print_status = True
+
+    pred_list = []    
+    cidx = np.arange(n_cb,dtype=np.int32)
+    rmask = np.ones(n_cb,dtype=np.bool8)
+    inittime = gettime()
+    preptime,predtime,posttime = 0.,0.,0.
     pbar = progressbar(pmsg,n_rb)
-    for i,rbeg in pbar(enumerate(rrange)):
+    for rbeg in pbar(rrange):
+        preptime = gettime()
         rend = rbeg+tile_dim
-        rinput = img_rgb[rbeg:rend]
 
-        #print('rinput.shape: "%s"'%str((rinput.shape)))
-        rwin = view_as_windows(rinput, input_win, step=stride).squeeze()
+        rwin = view_as_windows(img_rgb[rbeg:rend], tshape, step=stride)
+        # only keep tiles that contain nonzero values
+        #rmask[:] = rwin.reshape(rwin.shape[0],-1).any(axis=1)
+        #if (rmask==0).all():
+        #    continue
 
-        if rwin.ndim == 3:
-            rwin = rwin[np.newaxis]
-        elif rwin.ndim != 4:
-            warn('Unknown window dimensions, unable to proceed')
-            return []
+        # nkeep = np.count_nonzero(rmask)
+        # rinput = [nkeep,tile_shape,tile_shape,3]
+        # rwini = rwin[rmask]
+        rinput = model.preprocess(rwin.reshape(rshape))
+        if rtranspose:
+            rinput = rinput.transpose(rtranspose)
+        preptime += (gettime()-preptime)
         
-        cmask = rwin.reshape(rwin.shape[0],-1).any(axis=1)        
-        if (~cmask).all():
-            continue
-
-        #print(rwin.shape,ridx.shape,np.count_nonzero(ridx))
-        #cmask = view_as_windows(img_mask[rbeg:rend], input_win, step=stride).squeeze()
-
-        # rinput = [cols/tile_dim,3,tile_shape,tile_shape]
-        rinput = model.preprocess(rwin[cmask])
-        if model.transpose:
-            rinput = rinput.transpose([0]+[d+1 for d in model.transpose])
-
-        batch_size = min(np.count_nonzero(cmask),32)
-        #begtime = gettime()
-        # probrowi = [cols/tile_dim,2] softmax class probabilities
-        probrowi = model.predict(rinput,batch_size=batch_size)
-
-        # predrowi = [cols/tile_dim,1] softmax class predictions
-        #predrowi = np.int8(np.argmax(probrowi,axis=-1))
+        predtime = gettime()
+        # probi = [nkeep,2] softmax class probabilities
+        #probi = model.predict(rinput,batch_size=min(nkeep,n_cb))
+        rprob = model.predict(rinput)
+        rpred = np.int8(to_binary(rprob))
         
+        #rprob = rprob.reshape([rstep,-1,2])
+        #rpred = rpred.reshape([rstep,-1])
+        #rwseq = WindowSequence(rinput,batch_size=rinput.shape[0]//stride)        
+        #probi = model.base.predict_generator(rwseq,stride)
+        predtime += (gettime()-predtime)
+
+        posttime = gettime()
+        # predi = [nkeep,1] softmax class predictions
+
+        # if scale_probs:
+        #     ckeep = cidx[:nkeep]
+        #     probi[ckeep,predi] = 2*(probi[ckeep,predi]-0.5)
+        #     probi[ckeep,1-predi] = 1-probi[ckeep,predi]
+
+        # probwin = view_as_windows(img_prob[rbeg:rend], tdims+[2], step=stride).squeeze()
+        # predwin = view_as_windows(img_pred[rbeg:rend], tdims+[1], step=stride).squeeze()        
+
+        # probwin = probwin.swapaxes(1,3)
+        # predwin = predwin.swapaxes(1,3)
+        # probwin[cidx[rmask]] = probi
+
         # if print_state and (i%10)==0:
         #     print('prediction time: %0.3f seconds'%(gettime()-begtime))
         #     print('row block %d of %d'%(i,n_rb))
-        # rimage = img_rgb[rbeg:rend]
-        #     print('rimage.shape: "%s"'%str((rimage.shape)))
-        #     print('rwin.shape: "%s"'%str((rwin.shape)))
-        #     print('rinput.shape: "%s"'%str((rinput.shape)))            
 
+        # crangei = crange[rmask]
         
-        #rpred = np.int8(np.argmax(routput,axis=-1))
-        #rprob = np.amax(routput,axis=-1) 
-        #print('routput.shape: "%s"'%str((routput.shape)))
-        #print('rpred.shape: "%s"'%str((rpred.shape)))
-        #print('rprob.shape: "%s"'%str((rprob.shape)))
 
-        # rpred = img_pred[rbeg:rend]
-        # rprob = img_prob[rbeg:rend]
-        # output_win = (tile_dim,tile_dim,2)
-        # predwin = view_as_windows(rpred, output_win, step=stride).squeeze()
-        # probwin = view_as_windows(rprob, output_win, step=stride).squeeze()
+        for j,cbeg in enumerate(crange):
+            cend = cbeg+tile_dim            
+            img_prob[rbeg:rend,cbeg:cend,:] += rprob[j]
+            img_pred[rbeg:rend,cbeg:cend,rpred[j]] += 1
+            pred_list.append([rbeg,cbeg,rprob[j,1]])
 
-        # predwin[rpred] += 1
-        # probwin[...,0] += routput[...,0]
-        # probwin[...,1] += routput[...,1]
-        
-        #for j,cbeg in enumerate(range(0,cols-tile_dim,stride)):
-        #    cend = cbeg+tile_dim
-        #img_pred[ridx+rbeg,cidx,rpred] 
-        #img_prob[ridx+rbeg,cidx,:] += routput
+        posttime += (gettime()-posttime)
 
-        for cbeg,probij in zip(crange[cmask],probrowi):
-            cend,predij = cbeg+tile_dim, np.int8(probij[1]>probij[0])
+    pred_list = np.float32(pred_list)
+    print('total prediction time (%d tiles): %0.3f seconds'%(pred_list.shape[0],
+                                                             gettime()-inittime))
+    if print_status:
+        print('preprocessing time: %0.3f seconds'%(preptime/n_rb))
+        print('prediction time: %0.3f seconds'%(predtime/n_rb))
+        print('postprocessing time: %0.3f seconds'%(posttime/n_rb))
 
-            if scale_probs:
-                probij[predij] = 2*(probij[predij]-0.5)
-                probij[1-predij] = 1-probij[predij]
-            
-            img_prob[rbeg:rend,cbeg:cend,0] += probij[0]
-            img_prob[rbeg:rend,cbeg:cend,1] += probij[1]
-            img_pred[rbeg:rend,cbeg:cend,predij] += 1
-            
+
     # get average probabilities for each class by normalizing by pred counts
     img_total = img_pred.sum(axis=2)
     # find valid pixels with at least 1 prediction
     img_haspred = img_total!=0
-
-    img_prob[img_haspred,0] /= img_total[img_haspred]
-    img_prob[img_haspred,1] /= img_total[img_haspred]
+    
+    #img_prob[img_haspred,0] /= img_total[img_haspred]
+    #img_prob[img_haspred,1] /= img_total[img_haspred]
 
     img_amax = np.argmax(img_prob,axis=2)
-    img_pos,img_neg = (img_amax==1),(img_amax==0)    
+    img_pos,img_neg = (img_amax==1),((img_amax==0) & img_haspred)
     if 1:
         print('img_prob[img_pos,0].min(): "%s"'%str((img_prob[img_pos,0].min())))
-        print('img_prob[img_pos,1].min(): "%s"'%str((img_prob[img_pos,1].min())))
         print('img_prob[img_pos,0].max(): "%s"'%str((img_prob[img_pos,0].max())))
+        print('img_prob[img_pos,1].min(): "%s"'%str((img_prob[img_pos,1].min())))
         print('img_prob[img_pos,1].max(): "%s"'%str((img_prob[img_pos,1].max())))
+        print('img_prob[img_neg,0].min(): "%s"'%str((img_prob[img_neg,0].min())))
+        print('img_prob[img_neg,0].max(): "%s"'%str((img_prob[img_neg,0].max())))
+        print('img_prob[img_neg,1].min(): "%s"'%str((img_prob[img_neg,1].min())))
+        print('img_prob[img_neg,1].max(): "%s"'%str((img_prob[img_neg,1].max())))
         print('img_prob.sum(axis=2).max(): "%s"'%str((img_prob.sum(axis=2).max())))
 
     # if scale_probs:
@@ -622,14 +383,16 @@ def image_salience(model, img_data, tile_dim, tile_stride,
     if 0:
         print('after')
         print('img_prob[img_pos,0].min(): "%s"'%str((img_prob[img_pos,0].min())))
-        print('img_prob[img_pos,1].min(): "%s"'%str((img_prob[img_pos,1].min())))    
         print('img_prob[img_pos,0].max(): "%s"'%str((img_prob[img_pos,0].max())))
+        print('img_prob[img_pos,1].min(): "%s"'%str((img_prob[img_pos,1].min())))    
         print('img_prob[img_pos,1].max(): "%s"'%str((img_prob[img_pos,1].max())))
+        print('img_prob[img_neg,0].min(): "%s"'%str((img_prob[img_neg,0].min())))
+        print('img_prob[img_neg,0].max(): "%s"'%str((img_prob[img_neg,0].max())))
+        print('img_prob[img_neg,1].min(): "%s"'%str((img_prob[img_neg,1].min())))
+        print('img_prob[img_neg,1].max(): "%s"'%str((img_prob[img_neg,1].max())))
         print('img_prob.sum(axis=2).max(): "%s"'%str((img_prob.sum(axis=2).max())))
         raw_input()
 
-    
-        
     # crop row,col buffers
     rbeg,rend = tile_dim,rows-radd
     cbeg,cend = tile_dim,cols-cadd
@@ -648,19 +411,16 @@ def image_salience(model, img_data, tile_dim, tile_stride,
 
     pred_out = dict(img_prob=img_prob,
                     img_pred=img_pred,
-                    img_mask=img_mask)
+                    img_mask=img_mask,
+                    pred_list=pred_list)
 
-    if output_dir:
-        if not pathexists(output_dir):
-            warn('Output dir "%s" not found'%output_dir)
-            return {}
-        
-        plot_pred_images(img_rgb,pred_out,mapinfo=img_map,img_lab=img_lab,
+    if output_dir:        
+        plot_pred_images(img_rgb,pred_out,mapinfo=img_map,lab_mask=lab_mask,
                          output_dir=output_dir,output_prefix=output_prefix,
                          do_show=do_show)
         
     return pred_out
-            
+
 if __name__ == '__main__':
     import load_data
 
@@ -675,11 +435,15 @@ if __name__ == '__main__':
                         help="Model flavor (%s)"%('|'.join(valid_flavors)),
                         type=str)
     # output paths
-    parser.add_argument("-s", "--state_dir", type=str, default=default_state_dir,
+    parser.add_argument("-s", "--state_dir", type=str, default=None,
                         help="Path to save network output state (default=%s)"%default_state_dir)
     parser.add_argument("-o", "--output_dir", type=str,
                         help="Path to save output images/metadata (default=state_dir)")
 
+    module_func = 'tilepredictor_util.imread_image'
+    parser.add_argument("--load_func", help="Image loader function (default=%s)"%module_func,
+                        type=str,default=module_func)    
+    
     
     parser.add_argument("-w", "--weight_file", type=str,
                         help="Weight file to write or load")
@@ -689,28 +453,27 @@ if __name__ == '__main__':
                         help="Batch size (default=%d)"%batch_size)
     parser.add_argument("--seed", default=random_state, type=int,
                         help="Random seed (default=%d)"%random_state)
-    parser.add_argument("-a", "--augment", default=1.0, type=float, 
-                        help="Augmentation ratio (pos/neg, default=1)"%augment_size)
     
     
     # model training params
     parser.add_argument("--train_file", help="Training data file", type=str)    
     parser.add_argument("--test_file", help="Test data file", type=str)
     parser.add_argument("--mean_file", help="Mean image data file", type=str)
-    
+
+
     parser.add_argument("--test_epoch", type=int, default=test_epoch,
                         help="Epochs between testing (default=%d)"%test_epoch)
     parser.add_argument("--test_percent",type=float, default=0.2,
                         help="Percentage of test data to use during validation")
     parser.add_argument("--save_epoch", type=int, default=save_epoch,
                         help="Epochs between save cycles (default=%d)"%save_epoch)
-    parser.add_argument("--save_preds", action='store_true',
-                        help="Write preds to text file every save_epoch iterations'")
-    parser.add_argument("--conserve_memory", action='store_true',
-                        help="Conserve memory by not caching train/test tiles'")
+    #parser.add_argument("--save_preds", action='store_true',
+    #                    help="Write preds to text file every save_epoch iterations'")
+    #parser.add_argument("--conserve_memory", action='store_true',
+    #                    help="Conserve memory by not caching train/test tiles'")
     parser.add_argument("--balance", action='store_true',
                         help='Balance minority class in training data')
-    
+
     # prediction threshold
     parser.add_argument("--prob_thresh", type=float, default=0.0,
                         help="Threshold on prediction probabilities [0,100]")
@@ -734,7 +497,9 @@ if __name__ == '__main__':
                         help="Load best model in state_dir and compute/save preds for test_file'")
     parser.add_argument("--clobber", action='store_true',
                         help="Overwrite existing files.")
-    
+    parser.add_argument("--num_gpus", type=int, default=0,
+                        help="Number of GPUs to use (default=%d)"%num_gpus)
+        
     # hdr file params for geolocalization (optional)
     parser.add_argument("--hdr_dir", type=str,
                         help=".hdr file path for geocoding (default=image_dir)")
@@ -763,18 +528,15 @@ if __name__ == '__main__':
     model_flavor  = args.model_flavor
     tile_dim      = args.tile_dim
     batch_size    = args.batch_size
-    
     test_file     = args.test_file
-    save_preds    = args.save_preds
 
     mean_file     = args.mean_file
 
     test_epoch    = args.test_epoch
     test_percent  = args.test_percent
     save_epoch    = args.save_epoch
-    conserve_mem  = args.conserve_memory
+    #conserve_mem  = args.conserve_memory
     balance_train = args.balance
-    augment       = args.augment
     prob_thresh   = args.prob_thresh
     thresh_str    = '' if prob_thresh==0 else '%d'%prob_thresh
 
@@ -783,14 +545,16 @@ if __name__ == '__main__':
     output_dir    = args.output_dir or state_dir
 
     # salience map generation
-    img_dir     = args.image_dir 
-    img_pattern = args.image_load_pattern 
+    img_dir       = args.image_dir 
+    img_pattern   = args.image_load_pattern 
     tile_dir      = args.tile_dir
     tile_stride   = args.tile_stride
         
     pred_best     = args.pred_best
-    if pred_best:
-        save_preds = True
+    module_func   = args.load_func
+    
+    save_model    = True
+    save_preds    = True
 
     hdr_dir       = args.hdr_dir or img_dir
     hdr_pattern   = args.hdr_load_pattern or splitext(img_pattern)[0]+'*.hdr'
@@ -800,6 +564,7 @@ if __name__ == '__main__':
     
     verbose       = args.verbose
     clobber       = args.clobber
+    num_gpus      = args.num_gpus
     do_show       = args.plot
     
     tile_shape    = [tile_dim,tile_dim]
@@ -813,84 +578,89 @@ if __name__ == '__main__':
         save_preds = True
         model_weight_dir = pathjoin(state_dir,model_package,model_flavor,'*.h5')
 
-    print('Initializing model',model_flavor,model_package)
     model = compile_model(input_shape,output_shape,
                           model_state_dir=state_dir,
                           model_flavor=model_flavor,
                           model_package=model_package,
-                          model_weightf=model_weightf)
+                          model_weightf=model_weightf,
+                          num_gpus=num_gpus)
 
-    def preprocess_tile(img):
-        return model.preprocess(img).transpose(model.transpose)
+    # convert the mudule_func string to an actual python function 
+    load_func = import_load_func(module_func)
     
-    def load_preprocess_tile(imgf):
-        return preprocess_tile(imread_tile(imgf,tile_shape=tile_shape))
-    
-    memory_slots = 1 if conserve_mem else batch_size
-    loadparams = {'load_func':load_preprocess_tile,
-                  'conserve_memory':conserve_mem,
-                  'balance_train':balance_train,
-                  'memory_slots':memory_slots,
-                  'exclude_pattern':None, # 'exclude_pattern':'/tn/',
-                  'mean_image':mean_image}
+    def preprocess_tile(img,model=model,doplot=False,verbose=0):
+        pre = model.preprocess(img,verbose=verbose)
+        if doplot:
+            imgtitle='Before preprocessing: '+str(img.shape,extrema(img))
+            pretitle='After preprocessing: '+str(pre.shape,extrema(pre))
+            pl.ioff()
+            fig,ax = pl.subplots(1,2,sharex=True,sharey=True)
+            ax[0].imshow(img)
+            ax[0].set_title(imgtitle)
+            ax[1].imshow(pre.transpose(1,2,0))
+            ax[1].set_title(pretitle)
+            pl.show()
+        return pre
+
+    debug=0
+    def load_tile(tilef,tile_shape=tile_shape,verbose=debug):
+        tile = load_func(tilef,verbose=verbose)
+        if tile.shape[:2] != tile_shape:
+            tile = resize_tile(tile,tile_shape=tile_shape)
+        return preprocess_tile(tile,verbose=verbose)
+
     if train_file or test_file:
-        if train_file==test_file:
-            warn('train_file==test_file, sampling test data from train_file')
-            test_file = None
+        collect_test=True
+        loadparams = dict(load_func=load_tile,
+                          conserve_memory=True,
+                          balance_train=False, # balance below, not here
+                          exclude_pattern=None, # 'exclude_pattern='/tn/',
+                          mean_image=mean_image,
+                          class_mode='categorical',
+                          collect_test=collect_test)
+                
+        train_data,test_data = load_data.load_image_data(train_file,test_file,
+                                                         **loadparams)
+        (X_train,y_train,train_images) = train_data
+        (X_test,y_test,test_images) = test_data
+        
+        assert((y_train.ndim == 2) and (y_train.shape[1]==2))
+        assert((y_test.ndim == 2) and (y_test.shape[1]==2))
 
-        loadargs = (train_file,test_file)
-        X_train,y_train,X_test,y_test = load_data.load_data(*loadargs,**loadparams)
-        train_img_files = np.array(X_train.files)
-        if test_file:
-            test_img_files = np.array(X_test.files)
-        else:
-            test_img_files = []
-
-        if len(y_test)==0:
-            msg='No test data provided'
-            if test_percent > 0.0:
-                from sklearn.model_selection import train_test_split as trtesplit
-                train_img_files = np.array(X_train.files)
-                if y_train.ndim==1 or y_train.shape[1]==1:
-                    train_lab = y_train.copy()
-                else:
-                    train_lab = np.argmax(y_train,axis=-1)            
-                msg+=', testing on %d%% of training data'%int(test_percent*100)
-                train_idx, test_idx = trtesplit(np.arange(y_train.shape[0]),
-                                                train_size=1.0-test_percent,
-                                                stratify=train_lab,
-                                                random_state=random_state)
-                test_img_files = train_img_files[test_idx]
-                train_img_files = train_img_files[train_idx]
-
-                imgf2colkw = dict(load_func=loadparams['load_func'],
-                                 conserve_memory=loadparams['conserve_memory'])
-                X_train = imgfiles2collection(train_img_files,**imgf2colkw)
-                X_test = imgfiles2collection(test_img_files,**imgf2colkw)
-                y_train, y_test = y_train[train_idx], y_train[test_idx]
-            else:
-                msg+=', test_percent=0, no validation will be performed'
-                X_test,y_test = [],[]                
-            warn(msg)
-
+        validation_data = (X_test,y_test)
+                  
         if train_file:
-            model.train(X_train,y_train,X_test,y_test,batch_size=batch_size,
-                        train_ids=train_img_files,test_ids=test_img_files,
-                        save_epoch=save_epoch,save_preds=save_preds,
-                        test_epoch=test_epoch,test_percent=test_percent)
+            #train_gen = self.imaugment_batches(X_train,y_train,n_batches)
+            train_gen = datagen_arrays(X_train,y_train,batch_size,
+                                       datagen_params=train_datagen_params,
+                                       fill_partial=True,shuffle=True,
+                                       verbose=2)
+
+            callback_params=dict(nb_epochs=nb_epochs,
+                                 monitor='val_loss',
+                                 save_epoch=save_epoch,
+                                 save_preds=save_preds,
+                                 save_model=save_model,
+                                 test_epoch=test_epoch)
+            model.init_callbacks(**callback_params)
+            model.update_validation_callback(validation_data[0],
+                                             validation_data[1],
+                                             test_images)
+            n_batches = len(X_train)//batch_size
+            print(', '.join(['Training network for %d epochs'%nb_epochs,
+                             'batch size=%d'%batch_size,
+                             'batches/epoch=%d'%n_batches]))            
+            model.train(train_gen,nb_epochs,n_batches,
+                        validation_data=validation_data,
+                        **callback_params)
 
     if not model.initialized:
         print('Error: model not sucessfully initialized')
         sys.exit(1)
         
     if test_file:
-        if y_test.ndim==1 or y_test.shape[1]==1:
-            test_lab = y_test.copy()
-            y_test = to_categorical(y_test, nb_classes)
-        else:
-            test_lab = np.argmax(y_test,axis=-1)
-            
-        n_pos,n_neg = np.count_nonzero(test_lab==1),np.count_nonzero(test_lab!=1)
+        test_lab = to_binary(y_test)
+        n_pos,n_neg = class_stats(test_lab)
         n_test = n_pos+n_neg
         
         msg  = 'Computing predictions for test_file "%s"'%shortpath(test_file)
@@ -904,10 +674,11 @@ if __name__ == '__main__':
         pred_lab = pred_out['pred_lab']
         pred_prob = pred_out['pred_prob']
 
-        pred_mets = compute_metrics(test_lab,pred_lab)
+        pred_mets = compute_metrics(to_binary(y_test),pred_lab)
         pred_file = splitext(test_file)[0]+'_pred.txt'
-        write_predictions(pred_file, test_img_files, test_lab, pred_lab,
-                          pred_prob, pred_mets, fprfnr=True, buffered=False)
+        write_predictions(pred_file, test_img_files, to_binary(y_test),
+                          pred_lab, pred_prob, pred_mets, fnratfpr=0.01,
+                          buffered=False)
         print('Saved test predictions to "%s"'%pred_file)
 
     if img_dir:
@@ -917,6 +688,10 @@ if __name__ == '__main__':
             img_files = [img_dir]
         print('Computing salience for %d images in path "%s"'%(len(img_files),
                                                                img_dir))
+        
+        if not pathexists(output_dir):
+            print('Creating output directory %s'%output_dir)
+            os.makedirs(output_dir)
 
         img_map=None
         img_tile_dir=None
@@ -942,40 +717,42 @@ if __name__ == '__main__':
             if hdr_dir and pathexists(hdr_dir):
                 img_map = get_imagemap(img_id,hdr_dir,hdr_pattern)
 
-
-
             print('label_dir: "%s"'%str((label_dir)))
             print('label_pattern: "%s"'%str((label_pattern)))
-            img_lab = []
+            lab_mask = []
             if label_dir and pathexists(label_dir):
-                img_lab = get_imagelabs(img_id,label_dir,label_pattern)
-                print('img_lab info: "%s"'%str((img_lab.shape,img_lab.dtype,
-                                                extrema(img_lab.ravel()))))
+                lab_mask = get_lab_mask(img_id,label_dir,label_pattern)
+                if len(lab_mask) != 0:
+                    print('lab_mask info: "%s"'%str((lab_mask.shape,lab_mask.dtype,
+                                                    extrema(lab_mask.ravel()))))
 
-                if 0:
+                plot_labs=False
+                if plot_labs and len(lab_mask) != 0:
                     fig,ax = pl.subplots(1,1,sharex=True,sharey=True,figsize=(12,4))
                     img_over = np.zeros_like(img_data,dtype=np.float32)
-                    lab_mask = bwdilate(thickboundaries(img_lab>0),selem=disk(2))
+                    lab_mask = bwdilate(thickboundaries(lab_mask>0),selem=disk(2))
                     img_over[lab_mask, :] = [1.0,0.0,0.0,0.9]
                     aximshow(ax,img_data,img_id)                 
                     aximshow(ax,img_over,img_id+'+labels')
                     pl.show()
-                
-            salience_out = image_salience(model,img_data,
-                                          tile_dim,tile_stride,
+
+            salience_out = image_salience(model,img_data,tile_stride,
                                           output_dir,
                                           img_output_prefix,
-                                          img_lab=img_lab,
+                                          lab_mask=lab_mask,
                                           img_map=img_map,
                                           scale_probs=scale_probs,
                                           verbose=verbose,
                                           do_show=do_show)
 
-            #tile_out = pred_out['pred_list']
-            #write_csv(img_csvf,img_id,salience_out,tile_dim,prob_thresh,
-            #          imgmap=img_map)
+            pred_list = salience_out['pred_list']
+            write_csv(img_csvf,img_id,pred_list,tile_dim,prob_thresh,
+                      img_map=img_map)
             print('Completed salience processing for imageid "%s"'%img_id)
 
             if do_show:
                 pl.ioff();
                 pl.show()
+
+
+                

@@ -7,7 +7,7 @@ from pylib import *
 
 pyext=expanduser('~/Research/src/python/external')
 #sys.path.insert(0,pathjoin(pyext,'keras2/build/lib'))
-sys.path.insert(0,pathjoin(pyext,'keras204/build/lib'))
+#sys.path.insert(0,pathjoin(pyext,'keras204/build/lib'))
 #sys.path.insert(0,pathjoin(pyext,'keras207/build/lib'))
 #sys.path.insert(0,pathjoin(pyext,'keras208/build/lib'))
 sys.path.insert(0,pathjoin(pyext,'keras-multiprocess-image-data-generator'))
@@ -15,11 +15,14 @@ sys.path.insert(0,pathjoin(pyext,'CLR'))
 
 from pylib.dnn import *
 
-from keras.utils.np_utils import to_categorical
-from keras.callbacks import Callback, TerminateOnNaN, EarlyStopping, \
-    ModelCheckpoint, ReduceLROnPlateau, CSVLogger, TensorBoard
-from clr_callback import CyclicLR
-
+try:
+    from clr_callback import CyclicLR
+    use_clr = True
+except:
+    print('Could not import CyclicLR callback!')
+    use_clr = False
+    raw_input()
+    
 from tilepredictor_util import *
 
 tilepredictor_path = abspath(pathsplit(__file__)[0])
@@ -33,291 +36,381 @@ for pkg in valid_packages:
                           
 valid_flavors = list(set(valid_flavors))
 
-default_package   = valid_packages[0]
-default_flavor    = valid_flavors[0]
+default_package   = valid_packages[0] # 'keras'
+default_flavor    = valid_flavors[0] # 'cnn3'
 default_state_dir = './state/'
 
+# softmax probs are:
+# [0.0,0.5] class 0
+# [0.5,1.0] class 1
+# by default, we map these to [0.0,0.5] and store the class label separately
+# scale_probs maps the [0.0,0.5] probs to [0.0,1.0] per class
+scale_probs = True
+randomize = False
+
+# network architecture / training parameters
+nb_hidden = 1024 # nodes in last FC layer before classification
+nb_classes = 2 # we currently only consider binary classification problems 
+output_shape = [nb_hidden,nb_classes]
+
 # optimizer parameters
+nb_epochs = 5000
+batch_size = 32
 nb_workers = 1
-nb_epochs = 10000
-batch_size = 256
 random_state = 42
 tol = 1e-8
 optparams = dict(
-    init_lr = 0.001,
-    min_lr = 1e-6,
     weight_decay = 1e-6,
-    lr_reduce = 0.1,
+    reduce_lr = 0.1,
+    step_lr = 100,
     beta_1 = 0.9,
     beta_2 = 0.999,
-    clr_base = 0.0001,
-    clr_max = 0.002,
-    clr_step = 500,
+    lr_base = 0.0001,
+    lr_max = 0.001,
     obj_lambda2 = 0.0025,
     max_norm = np.inf, # 5.0
-    tol = tol
+    tol = tol,
+    stop_delta = 0.001
 )
 
-batch_rot_range=180.0
-batch_shear_range=10.0 # shear degrees
-batch_shift_range=0.1 # percentage of rows/cols to shift
-batch_zoom_range=0.1 # range = (1-zoom,1+zoom)
-batch_imaugment_params = dict(
-    zoom_range = (1.0-batch_zoom_range, 1.0+batch_zoom_range),
-    rotation_range = (-batch_rot_range, batch_rot_range),
-    shear_range = (-batch_shear_range, -batch_shear_range),
-    translation_range = (-batch_shift_range, batch_shift_range),
+train_rot_range=180.0
+train_shear_range=10.0 # shear degrees
+train_shift_range=0.1 # percentage of rows/cols to shift
+train_zoom_range=0.1 # range = (1-zoom,1+zoom)
+train_imaugment_params = dict(
+    zoom_range = (1.0-train_zoom_range, 1.0+train_zoom_range),
+    rotation_range = (-train_rot_range, train_rot_range),
+    shear_range = (-train_shear_range, -train_shear_range),
+    translation_range = (-train_shift_range, train_shift_range),
 )
 
-batch_datagen_params = dict(featurewise_center=False,
+train_datagen_params = dict(featurewise_center=False,
                             samplewise_center=False,
                             featurewise_std_normalization=False,
                             samplewise_std_normalization=False,
                             zca_whitening=False,
                             zca_epsilon=tol,
-                            rotation_range=batch_rot_range,
-                            width_shift_range=batch_shift_range,
-                            height_shift_range=batch_shift_range,
-                            shear_range=np.deg2rad(batch_shear_range),
-                            zoom_range=batch_zoom_range,
-                            fill_mode='reflect',
+                            rotation_range=train_rot_range,
+                            width_shift_range=train_shift_range,
+                            height_shift_range=train_shift_range,
+                            shear_range=np.deg2rad(train_shear_range),
+                            zoom_range=train_zoom_range,
+                            fill_mode='wrap',
                             horizontal_flip=True,
                             vertical_flip=True,
                             rescale=None,
                             preprocessing_function=None)
 
-datagen_fit_keys = ['zca_whitening','featurewise_center',
-                    'featurewise_std_normalization']
-
-msort = ['fscore','precision','recall']
-def compute_metrics(test_lab,pred_lab,pos_label=1,average='binary'):
-    prfs = precision_recall_fscore_support(test_lab,pred_lab,average=average,
-                                           pos_label=pos_label)
-    return dict(zip(['precision','recall','fscore'],prfs[:-1]))
-
-def prediction_summary(test_lab,pred_lab,npos,nneg,best_fs,best_epoch):
-    mout = compute_metrics(test_lab,pred_lab)
-    neg_preds = pred_lab==0
-    pos_preds = pred_lab==1
-    err_preds = pred_lab!=test_lab
-
-    nneg_pred = np.count_nonzero(neg_preds)
-    npos_pred = np.count_nonzero(pos_preds)
-    mtup = (npos,npos_pred,nneg,nneg_pred)
-
-    npos_mispred = np.count_nonzero(pos_preds & err_preds)
-    nneg_mispred = np.count_nonzero(neg_preds & err_preds)
- 
-    mstr = ', '.join(['%s=%9.6f'%(m,mout[m]*100) for m in msort])
-    mstr += '\n     pos=%d, pos_pred=%d, neg=%d, neg_pred=%d'%mtup
-    mstr += '\n     mispred pos=%d, neg=%d'%(npos_mispred,nneg_mispred)
-    mstr += '\n     best fscore=%9.6f, epoch=%d'%(best_fs*100,best_epoch)
-    return mout,mstr
-
-def write_predictions(predf, test_ids, test_lab, pred_lab, pred_out, pred_mets,
-                      fprfnr=True, buffered=False):
-    if len(test_ids)==[]:
-        warn('cannot write predictions without test_ids')
-        return
+@threadsafe_generator
+def datagen_arrays(X,y,batch_size,datagen_params=train_datagen_params,
+                   shuffle=True,fill_partial=True,
+                   random_state=random_state,verbose=0,
+                   preprocessing_function=None):
+    from keras.preprocessing.image import ImageDataGenerator
     
-    mout  = pred_mets or compute_metrics(test_lab,pred_lab)
-    mstr  = ', '.join(['%s=%9.6f'%(m,mout[m]*100) for m in msort])
-
-    if fprfnr:
-        from scipy import interp
-        from sklearn.metrics import roc_curve
-        pred_prob = np.where(pred_lab==1,pred_out,1.0-pred_out)
-        fprs, tprs, thresholds = roc_curve(test_lab, pred_prob)
-        fnrs = 1.0-tprs
-        optidx = np.argmin(fprs+fnrs)
-        fpr,fnr = fprs[optidx]*100,fnrs[optidx]*100
+    # only call datagen.fit() if these keys are present
+    fit_kw = ['zca_whitening','featurewise_center',
+              'featurewise_std_normalization']
         
-        fprs_interp = np.linspace(0.0, 1.0, 101)
-        fnrs_interp = interp(fprs_interp, fprs, fnrs)
-        fnr1fpr = fnrs_interp[fprs_interp==0.01][0]*100
-        mstr += '\n# fpr=%9.6f, fnr=%9.6f, fnr@1%%fpr=%9.6f'%(fpr,fnr,fnr1fpr) 
+    flowkw = dict(batch_size=batch_size,shuffle=shuffle,seed=random_state,
+                  save_to_dir=None,save_prefix='',save_format='png')
+    datagen_params.setdefault('preprocessing_function',preprocessing_function)
+    datagen = ImageDataGenerator(**datagen_params)
+    # only fit datagen if one of the fit keys is true
+    if any([datagen_params.get(key,False) for key in fit_kw]):
+        print('Fitting ImageDataGenerator for %d samples (this could take awhile)'%len(X))
+        fittime = gettime()
+        datagen.fit(X,seed=random_state)
+        print('Fit complete, processing time: %0.3f seconds'%gettime()-fittime)
+    transform = datagen.random_transform
+    datagen_iter = datagen.flow(X,y,**flowkw)
+    for bi, (X_batch, y_batch) in enumerate(datagen_iter):
+        bi_collection = is_collection(X_batch)
+        if bi_collection:
+            X_batch = X_batch.concatenate()
+        
+        if fill_partial and X_batch.shape[0] < batch_size:
+            # fill a partial batch with balanced+transformed inputs
+            X_fill,y_fill = fill_batch(X_batch,y_batch,batch_size,
+                                       balance=True)
+            X_batch = np.r_[X_batch,map(transform,X_fill)]
+            y_batch = np.r_[y_batch,y_fill]
+        if verbose>1 and bi==0:
+            print('\n\nBatch %d: '%bi,
+                  'is_collection: %s,'%str(bi_collection),
+                  'X_batch.shape: %s,'%str(X_batch.shape),
+                  'y_batch.shape: %s'%str(y_batch.shape))
+            band_stats(X_batch,verbose=1)
+            class_stats(to_binary(y_batch),verbose=1)
+
+        yield X_batch, y_batch
+
+@threadsafe_generator
+def datagen_directory(path,target_size,batch_size,
+                      datagen_params=train_datagen_params,
+                      classes=None,class_mode='categorical',                      
+                      shuffle=True,fill_partial=True,
+                      random_state=random_state,
+                      preprocessing_function=None,
+                      verbose=0):
+    from keras.preprocessing.image import ImageDataGenerator
+
+    # only call datagen.fit() if these keys are present
+    fit_kw = ['zca_whitening','featurewise_center',
+              'featurewise_std_normalization']
+    flowkw = dict(class_mode=class_mode, classes=classes, color_mode='rgb', 
+                  batch_size=batch_size, target_size=target_size,
+                  shuffle=shuffle, seed=random_state, follow_links=True,
+                  save_to_dir=None, save_prefix='', save_format='png')
+    datagen_params.setdefault('preprocessing_function',preprocessing_function)
+    datagen = ImageDataGenerator(**datagen_params)
+    # only fit datagen if one of the fit keys is true
+    if any([datagen_params.get(key,False) for key in fit_kw]):
+        print('Fitting ImageDataGenerator for %d samples (this could take awhile)'%len(X))
+        fittime = gettime()
+        datagen.fit(X,seed=random_state)
+        print('Fit complete, processing time: %0.3f seconds'%gettime()-fittime)
+    transform = datagen.random_transform
+    datagen_iter = datagen.flow_from_directory(path,**flowkw)
+    for bi, (X_batch, y_batch) in enumerate(datagen_iter):
+        bi_collection = is_collection(X_batch)
+        if bi_collection:
+            X_batch = X_batch.concatenate()
+        
+        if fill_partial and X_batch.shape[0] < batch_size:
+            # fill a partial batch with balanced+transformed inputs
+            X_fill,y_fill = fill_batch(X_batch,y_batch,batch_size,
+                                       balance=True)
+            X_batch = np.r_[X_batch,map(transform,X_fill)]
+            y_batch = np.r_[y_batch,y_fill]
+        if verbose>1 and bi==0:
+            print('\n\nBatch %d: '%bi,
+                  'is_collection: %s,'%str(bi_collection),
+                  'X_batch.shape: %s,'%str(X_batch.shape),
+                  'y_batch.shape: %s'%str(y_batch.shape))
+            band_stats(X_batch,verbose=1)
+            class_stats(to_binary(y_batch),verbose=1)
+        yield X_batch, y_batch
+
+def parse_model_meta(modelf,val_monitor='val_loss'):
+    """
+    parse_meta(modelf)
+
+    Summary: parses initial_epoch and initial_monitor from a model or weight filename
+
+    Arguments:
+    - self: self
+    - modelf: filename containing epoch/monitor values 
+
+    Keyword Arguments:
+    None
+
+    Output:
+    - initial_epoch
+    - initial_monitor
+
+    """
+
+    start_epoch = 0
+    start_monitor = None
+    val_type = val_monitor.replace('val_','')
+    fields = basename(modelf).split('_')
+    msg = []
+    for field in fields:
+        for epoch_key in ('iter','epoch'):
+            if field.startswith(epoch_key):
+                start_epoch = int(field.replace(epoch_key,''))
+                msg.append('start_epoch value=%d'%start_epoch)
+        for monitor_key in ('loss','fscore'):
+            if monitor_key in field:
+                if monitor_key != val_type:
+                    warn('found monitor "%s" that differs from model.val_type="%s", ignored')
+                    continue
+                start_monitor = float(field.replace(monitor_key,''))
+                msg.append('start_monitor value=%.6f'%start_monitor)
+
+    if len(msg)!=0:
+        print('Parsed',', '.join(msg),'from',modelf)
+                
+    return start_epoch, start_monitor
     
-    n_lab = len(test_ids)
-    m_err = test_lab!=pred_lab
-    pos_lab,neg_lab = (test_lab==1),(test_lab!=1)
-    n_tp = np.count_nonzero(~m_err & pos_lab)
-    n_tn = np.count_nonzero(~m_err & neg_lab)
-    n_fp = np.count_nonzero(m_err & neg_lab)
-    n_fn = np.count_nonzero(m_err & pos_lab)    
-    n_acc,n_err = n_tp+n_tn, n_fp+n_fn
-    n_pos,n_neg = n_tp+n_fn, n_tn+n_fp
-    outstr = ['# %d samples: # %d correct, %d errors'%(n_lab,n_acc,n_err),
-              '# [tp=%d+fn=%d]=%d positive'%(n_tp,n_fn,n_pos) + \
-              ' [tn=%d+fp=%d]=%d negative'%(n_tn,n_fp,n_neg),
-              '# %s'%mstr, '#', '# id lab pred prob']
-    with open(predf,'w') as fid:
-        if not buffered:
-            print('\n'.join(outstr),file=fid)        
-        for i,m_id in enumerate(test_ids):
-            labi,predi,probi = test_lab[i],pred_lab[i],pred_out[i]
-            outstri = '%s %d %d %7.4f'%(str(m_id),labi,predi,probi*100)
-            if buffered:
-                outstr.append(outstri)
-            else:
-                print(outstri,file=fid)
-        if buffered:
-            print('\n'.join(outstr),file=fid)
-
-class MetricsCheckpoint(Callback):
-    global msort
-    def __init__(self,model_dir,metrics=msort,val_monitor='val_loss',
-                 mode='auto',test_ids=[],save_best_preds=False,
-                 period=1,verbose=0):
-        super(MetricsCheckpoint, self).__init__()
-        self.metrics     = dict([(m,[]) for m in metrics])
-        self.test_lab    = None
-        self.statestr    = None
-        
-        self.val_monitor = val_monitor
-        self.val_mode    = mode
-        self.val_func    =  np.max if self.val_mode=='max' else np.min
-        self.val_best    = -np.inf if self.val_mode=='max' else np.inf
-
-        self.test_ids    = test_ids
-        self.save_preds  = save_best_preds
-        self.period      = period
-        self.verbose     = verbose
-        self.model_dir   = model_dir
-        
-    def on_train_begin(self, logs=None):
-        logs = logs or {}
-
-    def on_train_end(self, logs=None):
-        logs = logs or {}
-
-    def on_batch_begin(self, batch, logs=None):
-        logs = logs or {}
-
-    def on_batch_end(self, batch, logs=None):
-        logs = logs or {}
-        
-    def on_epoch_begin(self, epoch, logs=None):
-        logs = logs or {}
-        self.epoch_start_time  = gettime()
-        if self.statestr:
-            print(self.statestr)
-            self.statestr = None
-            
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-        self.epoch_end_time  = gettime()
-        etime = self.epoch_end_time-self.epoch_start_time
-        val_monitor = self.val_monitor
-        statestr = '\nEpoch %05d: processing time: %0.3f seconds'%(epoch+1,etime)
-        if self.validation_data:
-            if self.test_lab is None:
-                self.test_lab = np.int8(np.argmax(self.validation_data[1],-1))
-
-            pred_out = np.asarray(self.model.predict(self.validation_data[0]))
-            pred_lab = np.int8(np.argmax(pred_out,axis=-1))
-            pred_out = np.amax(pred_out,axis=-1)
-            pred_mets = compute_metrics(self.test_lab,pred_lab)
-            mstr = ['loss=%9.6f'%logs['val_loss']]
-            for m in self.metrics:
-                mval = pred_mets[m]
-                self.metrics[m].append(mval)
-                logs['val_'+m] = mval
-                mstr.append('%s=%9.6f'%(m,pred_mets[m]*100))
-            mstr = ', '.join(mstr)
-            statestr += '\nValidation '+mstr #+', support='+str(supp)
-
-            if (epoch % self.period)==0:
-                val_epoch = np.float32(logs[val_monitor])
-                val_cmp = self.val_func([self.val_best,val_epoch])            
-                if val_cmp==val_epoch and val_cmp != self.val_best:
-                    val_best = val_epoch
-                    statestr += '\nNew best %s=%9.6f'%(val_monitor,val_best)
-                    self.val_best = val_best
-                    if self.save_preds:
-                        monitor_str = val_monitor.replace('val_','')
-                        predsf = 'preds_iter{epoch:d}_%s{%s:.6f}.txt'%(monitor_str,val_monitor)
-                        predd = {'epoch':epoch,val_monitor:val_best}
-                        predsf = pathjoin(self.model_dir,predsf.format(**predd))
-                        statestr += '\nSaved best predictions to %s'%predsf
-                        write_predictions(predsf, self.test_ids, self.test_lab,
-                                          pred_lab, pred_out, pred_mets,
-                                          fprfnr=True, buffered=False)
-        statestr += '\n'
-        self.statestr = statestr
-
-#@timeit
-def collect_batch(imgs,labs,batch_idx=[],imgs_out=[],labs_out=[]):
-    # collect img_out,lab_out from collection imgs
-    imgshape = imgs[0].shape
-    nbatch = len(batch_idx)
-    if nbatch==0:
-        nbatch = len(labs)
-        batch_idx = range(nbatch)
-    if len(imgs_out)!=nbatch:
-        imgs_out = np.zeros([nbatch]+list(imgshape),dtype=imgs[0].dtype)
-        labs_out = np.zeros([nbatch,labs.shape[1]],dtype=labs[0].dtype)
-    for i,idx in enumerate(batch_idx):
-        imgs_out[i] = imgs[idx]
-        labs_out[i] = labs[idx]
-    return imgs_out,labs_out
-
-#@timeit
-def imaugment_perturb(*args,**kwargs):
-    from imaugment import perturb_batch as _pb
-    kwargs['train_params'] = batch_imaugment_params
-    return _pb(*args,**kwargs)
-
 class Model(object):
     """
     Model: wrapper class for package model predictor functions
     """
     def __init__(self, **kwargs):
-        self.initialized  = False        
-        self.flavor       = kwargs['flavor']
-        self.package      = kwargs['package']
-        self.backend      = kwargs['backend']
-        self.params       = kwargs['params']
-        self.base         = kwargs['base']
-        self.batch        = kwargs['batch']
-        self.predict      = kwargs['predict']
-        self.transform    = kwargs['transform']
-        self.saveweights  = kwargs['save']
-        self.loadweights  = kwargs['load']
-        self.compile      = kwargs['compile']
-        self.preprocess   = preprocess_img_u8
-        self.start_epoch  = 0
-        
-        if self.backend=='tensorflow':
-            self.image_data_format = 'channels_last' 
-            self.transpose = (0,1,2) # channels last=(0,1,2)=default
-        elif self.backend=='theano':
-            self.image_data_format = 'channels_first' 
-            self.transpose = (2,0,1) # channels first=(2,0,1)
+        self.initialized   = False        
+        self.flavor        = kwargs['flavor']
+        self.package       = kwargs['package']
+        self.backend       = kwargs['backend']
+        self.base          = kwargs['base']
+        self.params        = kwargs['params']
+        self.input_shape   = kwargs['input_shape']
+        self.batch         = kwargs['batch']
+        self.predict       = kwargs['predict']
+        self.transform     = kwargs['transform']
+        self.state_dir     = kwargs['state_dir']
+        self.load_base     = kwargs['load_base']
 
-        self.model_dir = pathjoin(kwargs['state_dir'],self.package,self.flavor)
+        self.callbacks     = []
+        self.start_epoch   = kwargs['start_epoch']
+        self.start_monitor = kwargs['start_monitor']
+        self.transpose     = kwargs['transpose']
+
+        self.val_monitor   = 'val_loss'
+        self.val_type      = self.val_monitor.replace('val_','')
+        self.val_best      = None
+        self.val_cb        = None
+        
+        model_suf = '_'.join([self.flavor,self.package])
+        self.model_dir = pathjoin(self.state_dir,model_suf)
         if not pathexists(self.model_dir):
             makedirs(self.model_dir,verbose=True)
 
-        model_png = pathjoin(self.model_dir,'model.png')
-        if not pathexists(model_png):
-            from keras.utils.vis_utils import plot_model
-            print('Saving model diagram to %s'%model_png)
-            plot_model(self.base, to_file=model_png, show_layer_names=True,
-                       show_shapes=True)            
+    def preprocess(self,img,transpose=True,verbose=0):
+        n_bands=img.shape[-1]
+        dtype = img.dtype
+        if dtype != np.uint8:
+            raise Exception('No preprocessing function defined for dtype "%s"!'%str(dtype))
+        shape = img.shape        
+        if img.ndim not in (3,4) or n_bands != 3:
+            raise Exception('No preprocessing function defined for image shape "%s"!'%str(shape))
+        imgpre = preprocess_img_u8(img)
+        if verbose:
+            if img.ndim == 3:
+                imin,imax,_ = band_stats(img[np.newaxis])
+                omin,omax,_ = band_stats(imgpre[np.newaxis])
+            else:
+                imin,imax,_ = band_stats(img)
+                omin,omax,_ = band_stats(imgpre)
+                
+        if transpose:
+            if imgpre.ndim==3:
+                imgpre = imgpre.transpose(self.transpose) 
+            elif imgpre.ndim==4:
+                imgpre = imgpre.transpose([0]+[i+1 for i in self.transpose]) 
+        if verbose:
+            print('Before preprocess: '
+                  'type=%s, shape=%s, '%(str(dtype),str(shape)),
+                  'range = %s'%str(map(list,np.c_[imin,imax])))
+            otype = imgpre.dtype
+            oshape = imgpre.shape
+            print('After preprocess: '
+                  'type=%s, shape=%s, '%(str(otype),str(oshape)),
+                  'range = %s'%str(map(list,np.c_[omin,omax])))
+        
+        return imgpre
 
-    def save(self,outfile):
-        pass
+    def compile(self):
+        self.base.compile(**self.params)
     
-    def load(self,infile):
-        pass
+    def save(self,modelf,**kwargs):
+        kwargs.setdefault('overwrite',True)
+        self.base.save(modelf,**kwargs)
+    
+    def load(self,modelf,**kwargs):
+        self.start_epoch, self.start_monitor = parse_model_meta(modelf)
+        self.base = self.load_base(modelf,**kwargs)
             
-    def save_weights(self, *args, **kwargs):
-        return self.saveweights(*args,**kwargs)
+    def save_weights(self, weightf, **kwargs):
+        kwargs.setdefault('overwrite',True)
+        self.base.save_weights(weightf,**kwargs)
     
-    def load_weights(self, *args, **kwargs):
-        self.base = self.loadweights(*args,**kwargs)
+    def load_weights(self, weightf, **kwargs):
+        self.start_epoch, self.start_monitor = parse_model_meta(weightf)        
+        self.base.load_weights(weightf,**kwargs)
         self.initialized = True
 
+    def update_validation_callback(self,test_data,test_labs,test_ids,**kwargs):
+        if not self.val_cb:
+            warn('validation callback not initialized')
+            return
+
+        self.val_cb.update_data(test_data,test_labs,test_ids,**kwargs)            
+
+    def init_callbacks(self,nb_epochs=nb_epochs,**kwargs):
+        from keras.callbacks import TerminateOnNaN, EarlyStopping, \
+            ReduceLROnPlateau, CSVLogger, TensorBoard
+        from validation_checkpoint import ValidationCheckpoint
+        
+        val_monitor = kwargs.pop('monitor','val_loss')
+        step_lr = kwargs.pop('step_lr',optparams['step_lr'])
+        step_lr = step_lr or min(100,max(1,int(nb_epochs*0.01)))
+        stop_early = kwargs.pop('stop_early',max(10*step_lr,int(nb_epochs*0.2)))
+        
+        # strides to test/save model during training        
+        test_epoch = kwargs.pop('test_epoch',1)
+        save_epoch = kwargs.pop('save_epoch',1)
+        random_state = kwargs.pop('random_state',42)
+        verbose = kwargs.pop('verbose',1)        
+        # exit early if the last [stop_early] test scores are all worse than the best
+
+        save_preds = kwargs.pop('save_preds',True)    
+        save_model = kwargs.pop('save_model',True) 
+        
+        model_dir = self.model_dir
+        initial_monitor = self.start_monitor
+        
+        # configure callbacks
+        train_logf = pathjoin(model_dir,'training_log.csv')
+        val_mode = 'auto'
+
+        self.val_monitor = val_monitor
+        self.save_preds = save_preds
+        self.save_model = save_model
+        self.val_period = save_epoch
+        self.verbose_callbacks = verbose
+            
+        self.val_cb = ValidationCheckpoint(val_monitor=val_monitor,
+                                           save_best_preds=save_preds,
+                                           save_best_model=save_model,
+                                           model_dir=model_dir,
+                                           mode=val_mode,
+                                           initial_monitor=initial_monitor,
+                                           period=save_epoch, verbose=verbose)
+        #self.val_cb = ModelCheckpoint(model_iterf,monitor=val_monitor,mode=val_mode, period=save_epoch,
+        #                        save_best_only=True, save_weights_only=False,                                
+        #                        verbose=False)
+        if use_clr:
+            self.lr_cb = CyclicLR(base_lr=optparams['lr_base'],
+                                  max_lr=optparams['lr_max'],
+                                  step_size=step_lr)
+        else:
+            self.lr_cb = ReduceLROnPlateau(monitor=val_monitor,
+                                           mode=val_mode,
+                                           patience=step_lr,
+                                           min_lr=optparams['lr_base'],
+                                           factor=optparams['reduce_lr'],
+                                           epsilon=optparams['tol'],
+                                           verbose=verbose)
+        
+        self.es_cb = EarlyStopping(monitor=val_monitor, patience=stop_early,
+                                   mode=val_mode, min_delta=optparams['stop_delta'],
+                                   verbose=verbose)
+        self.tn_cb = TerminateOnNaN()
+        if pathexists(train_logf) and pathsize(train_logf) != 0:
+            ctimestr = epoch2str(pathctime(train_logf))
+            logf_base,logf_ext = splitext(train_logf)
+            old_logf = logf_base+'_'+ctimestr+logf_ext
+            print('Backing up existing log file "%s" to "%s"'%(train_logf,old_logf))
+            os.rename(train_logf,old_logf)
+        
+        self.cv_cb = CSVLogger(filename=train_logf,append=True)
+        self.callbacks = [self.val_cb,self.lr_cb,self.es_cb,self.tn_cb,self.cv_cb]
+
+        use_tb = False
+        if use_tb:
+            tb_batch_size=32
+            tb_freq = 10
+            tb_log_dir = pathjoin(model_dir,'tb_logs')
+            self.tb_cb = TensorBoard(log_dir=tb_log_dir, histogram_freq=tb_freq,
+                                batch_size=tb_batch_size,
+                                write_graph=True, write_grads=True,
+                                write_images=True, embeddings_freq=0,
+                                embeddings_layer_names=None,
+                                embeddings_metadata=None)
+            self.callbacks.append(self.tb_cb)
+                
     def write_mispreds(self, outf, mispred_ids):
         n_mispred=len(mispred_ids)
         if n_mispred==0:
@@ -362,188 +455,65 @@ class Model(object):
                     
         except KeyboardInterrupt:
             if self.initialized:
-                print('User interrupt')
-                #print('saving model')
-                #out_weightf = train_weight_iterf%epoch
+                print('User interrupt, saving model')
                 #self.save_weights(out_weightf)
-
                 
-    def datagen_batches(self,X_train,y_train,n_batches,
-                        random_state=random_state):
-        from keras.preprocessing.image import ImageDataGenerator        
-        batch_size = int(len(X_train)/n_batches)
-        batch_idx = np.arange(batch_size,dtype=int)        
-        batch_transpose = [0]+[i+1 for i in self.transpose]        
-        datagen = ImageDataGenerator(**batch_datagen_params)
-        flowkw = dict(batch_size=batch_size,shuffle=True,seed=random_state,
-                      save_to_dir=None,save_prefix='',save_format='png')
-        try:
-            bi = 0
-            # only fit datagen if one of the fit keys is true
-            do_fit = any([batch_datagen_params.get(key,False)
-                          for key in datagen_fit_keys])
-            if do_fit:
-                datagen.fit(X_train,seed=random_state)
-            transform = datagen.random_transform
-            for bi, (X_batch, y_batch) in enumerate(datagen.flow(X_train,
-                                                                 y_train,
-                                                                 **flowkw)):
-                if X_batch.shape[0] < batch_size:
-                    # fill a partial batch with balanced+transformed inputs
-                    X_batch,y_batch = augment_batch(X_batch,y_batch,batch_idx,
-                                                    transform=transform)
+    def train(self,train_gen,n_epochs,n_batches,initial_epoch=None,
+              validation_data=None,verbose=1,**kwargs):
 
-                yield X_batch.transpose(batch_transpose), y_batch
-        
-        except KeyboardInterrupt:
-            if self.initialized:
-                print('User interrupt')
-                #print('saving model')
-                #out_weightf = train_weight_iterf%epoch
-                #self.save_weights(out_weightf)
+        if len(self.callbacks)==0:
+            warn('Training model with no callbacks (did you call init_callbacks?)')
 
-                
-    def fit_generator(self,*args,**kwargs):
-         return self.base.fit_generator(*args,**kwargs)
+        initial_epoch = initial_epoch or self.start_epoch
             
-    def train(self,X_train,y_train,X_test=[],y_test=[],
-              nb_epochs=nb_epochs,**kwargs):
-        
-        use_clr = kwargs.pop('use_clr',True)
-        batch_size = kwargs.pop('batch_size',128)
-        augment = kwargs.pop('augment',1.0)
-        test_percent = kwargs.pop('test_percent',0.2)
-        # strides to test/save model during training
-        test_epoch = kwargs.pop('test_epoch',1)
-        save_epoch = kwargs.pop('save_epoch',1)
-        random_state = kwargs.pop('random_state',42)
-        collect_test = kwargs.pop('collect_test',True)
-
-        val_monitor = kwargs.pop('val_monitor','val_loss')
-        verbose = kwargs.pop('verbose',1)
-
-        # exit early if the last [stop_early] test scores are all worse than the best
-        stop_early = kwargs.pop('stop_early',max(100,int(nb_epochs*0.2)))
-        lr_step = kwargs.pop('lr_step',min(100,max(1,int(nb_epochs*0.01))))
-
-        save_preds = kwargs.pop('save_preds',True)
-        train_ids = kwargs.pop('train_ids',[])
-        test_ids = kwargs.pop('test_ids',[])
-            
-        if y_train.ndim==1 or y_train.shape[1]==1:
-            train_lab = y_train.copy()
-            y_train = to_categorical(y_train, nb_classes)
-        else:
-            train_lab = np.argmax(y_train,axis=-1)
-
-        print("Training samples: {}, input shape: {}".format(len(X_train),X_train[0].shape))
-        print('Training classes: {}'.format((np.count_nonzero(train_lab==0),np.count_nonzero(train_lab==1))))            
-        if len(y_test)>0:
-            if y_test.ndim==1 or y_test.shape[1]==1:
-                test_lab = y_test.copy()
-                y_test = to_categorical(y_test, nb_classes)
-            else:
-                test_lab = np.argmax(y_test,axis=-1)
-            
-            n_neg,n_pos = np.count_nonzero(test_lab==0),np.count_nonzero(test_lab==1)
-            print("Testing samples: {}, input shape: {}".format(len(X_test),X_test[0].shape))        
-            print('Testing classes: {} neg, {} pos'.format(n_neg,n_pos))
-
-            if collect_test:
-                print('Loading %d test samples into memory'%(len(y_test)))
-                X_test,y_test = collect_batch(X_test,y_test)
-                for bi in range(X_test.shape[-1]):
-                    bmin,bmax=extrema(X_test[...,bi].ravel())
-                    print('band[%d] min=%.3f, max=%.3f'%(bi,bmin,bmax))
-
-                batch_transpose = [0]+[dimv+1 for dimv in self.transpose]
-                X_test = X_test.transpose(batch_transpose)
-
-            validation_data = (X_test,y_test)
-            validation_steps = len(X_test)//batch_size
-        else:
-            print("Testing samples: 0")
-            print('Testing classes: 0 neg, 0 pos')
-            
-            n_neg,n_pos = 0,0
-            val_monitor = val_monitor.replace('val_','')
-            validation_data = None
-            validation_steps = None
-
-            
-        model_dir = self.model_dir
-        
-        # configure callbacks
-        monitor_str = val_monitor.replace('val_','')
-        model_iterf  = 'model_iter{epoch:d}_%s{%s:.6f}.h5'%(monitor_str,val_monitor)
-        model_iterf = pathjoin(model_dir,model_iterf)
-        train_csv_logf = pathjoin(model_dir,'training.log')
-        val_mode='max' if monitor_str in ('fscore','acc') else 'min'
-
-        em_cb = MetricsCheckpoint(model_dir,save_best_preds=save_preds,
-                                  test_ids=test_ids, metrics=msort, 
-                                  val_monitor=val_monitor, mode=val_mode,
-                                  period=save_epoch, verbose=verbose)
-        cp_cb = ModelCheckpoint(model_iterf,monitor=val_monitor,mode=val_mode, period=save_epoch,
-                                save_best_only=True, save_weights_only=False,                                
-                                verbose=False)
-        if use_clr:
-            lr_cb = CyclicLR(base_lr=optparams['clr_base'],
-                             max_lr=optparams['clr_max'],
-                             step_size=optparams['clr_step'])
-        else:
-            lr_cb = ReduceLROnPlateau(monitor=val_monitor,
-                                      mode=val_mode,
-                                      patience=lr_step,
-                                      min_lr=optparams['min_lr'],
-                                      factor=optparams['lr_reduce'],
-                                      epsilon=optparams['tol'],
-                                      verbose=verbose)
-
-        
-        es_cb = EarlyStopping(monitor=val_monitor, patience=stop_early,
-                              mode=val_mode, min_delta=0.01, verbose=verbose)
-        tn_cb = TerminateOnNaN()
-        cv_cb = CSVLogger(filename=train_csv_logf,append=False)
-        cb_list = [em_cb,cp_cb,lr_cb,es_cb,tn_cb,cv_cb]
-
-        use_tb=False
-        if use_tb:
-            tb_freq = 10
-            tb_log_dir = pathjoin(model_dir,'tb_logs')
-            tb_cb = TensorBoard(log_dir=tb_log_dir, histogram_freq=tb_freq,
-                                batch_size=batch_size,
-                                write_graph=True, write_grads=True,
-                                write_images=True, embeddings_freq=0,
-                                embeddings_layer_names=None,
-                                embeddings_metadata=None)
-            cb_list.append(tb_cb)
-
-        n_batches = int(len(X_train)//batch_size)
-        msg = ['Training network for %d epochs'%nb_epochs,
-               'batch size=%d'%batch_size,
-               'batches/epoch=%d'%n_batches]
-        print(', '.join(msg))
-
-        #batch_gen = self.imaugment_batches(X_train,y_train,n_batches)
-        batch_gen = self.datagen_batches(X_train,y_train,n_batches)
-        self.fit_generator(batch_gen,n_batches,
-                           validation_data=validation_data,
-                           validation_steps=validation_steps,
-                           epochs=nb_epochs,workers=nb_workers,
-                           callbacks=cb_list,verbose=verbose)
+        self.base.fit_generator(train_gen,n_batches,
+                                epochs=n_epochs,
+                                initial_epoch=initial_epoch,
+                                validation_data=validation_data,
+                                callbacks=self.callbacks,
+                                workers=nb_workers,                                
+                                verbose=verbose)
 
         self.initialized = True
 
 def compile_model(input_shape,output_shape,**params):
+    from keras.backend import image_data_format,set_image_data_format
     import importlib
     
     nb_hidden,nb_classes = output_shape
 
     package   = params.pop('model_package',default_package)
     flavor    = params.pop('model_flavor',default_flavor)
-    state_dir = params.pop('model_state_dir',default_state_dir)
+    state_dir = params.pop('model_state_dir',None)
     weightf   = params.pop('model_weightf',None)
+    flavorp   = params.pop('flavor_params',{})
+
+    use_backend_format = kwargs.pop('use_backend_format',True)
+    
+    # new paths: e.g., state_dir/cnn3_keras
+    state_suf = '_'.join([flavor,package])
+    if pathexists(pathjoin(state_dir,package,flavor)):
+        # old paths: e.g., state_dir/keras/cnn3
+        state_suf = pathjoin(package,flavor)
+        
+    if weightf and not pathexists(weightf):
+        if state_dir and pathexists(pathjoin(state_dir,state_suf,weightf)):
+            print('Found weight file "%s" in state_dir "%s"'%(weightf,state_dir))
+            weightf = pathjoin(state_dir,state_suf,weightf)
+        else:
+            print('Weight file "%s" not found'%weightf)
+            weightf = None
+    
+    if not state_dir:
+        if weightf:
+            model_dir,weight_file = pathsplit(weightf)
+            state_dir = model_dir.replace(state_suf,'')
+            state_dir = state_dir.replace('//','/')
+            print('Using model state_dir="%s"'%state_dir)
+        else:
+            state_dir = default_state_dir
+    model_dir = pathjoin(state_dir,state_suf)
+    num_gpus  = params.pop('num_gpus',0)
 
     if package not in valid_packages:
         packages_str = str(valid_packages)
@@ -558,26 +528,94 @@ def compile_model(input_shape,output_shape,**params):
     package_id  = "{package}_model".format(**locals())
     flavor_id   = "models.{flavor}_{package}".format(**locals())    
     package_lib = importlib.import_module(package_id)    
-    flavor_lib  = importlib.import_module(flavor_id)                    
+    flavor_lib  = importlib.import_module(flavor_id)
+    model_backend = package_lib.backend().backend()
+
+    model_transpose = [0,1,2]
+    set_image_data_format('channels_last')
+    if use_backend_format:
+        if model_backend=='tensorflow':
+            set_image_data_format('channels_last')
+            if input_shape[0]==3:
+               input_shape = input_shape[1:]+[3]
+               model_transpose = [2,0,1]
+        elif model_backend=='theano':    
+            set_image_data_format('channels_first')
+            if input_shape[-1]==3:
+               input_shape = [3]+input_shape[:-1]
+               model_transpose = [2,0,1]
+
+    start_epoch, start_monitor = 0, None
     if weightf:
-        print('Restoring existing model from file:',weightf)
+        start_epoch, start_monitor = parse_model_meta(weightf)
+        print('Restoring existing %s_%s model'%(flavor,package),
+              'from file: "%s"'%weightf,'with',
+              'start_epoch=%d,'%start_epoch,
+              'start_monitor=%.6f'%start_monitor)
         model_base = package_lib.load_model(weightf)        
     else:
-        model_base = flavor_lib.model_init(input_shape,**params)
+        print('Initializing new %s_%s model'%(flavor,package),
+              'with','input_shape=%s,'%str(input_shape),
+              'model_transpose=%s,'%str(model_transpose),
+              'image_data_format=%s'%image_data_format())
+        model_params = flavor_lib.model_init(input_shape,**flavorp)
+        lr_mult = model_params.pop('lr_mult',1.0)        
+        model_base = model_params['model']
+
+        if lr_mult!=1.0:
+            lr_upkeys = []
+            for key,val in optparams.iteritems():
+                if key.startswith('lr_'):
+                    optparams[key] = optparams[key]*lr_mult
+                    lr_upkeys.append(key)
+
+            print('Updated optparams "%s" with lr_mult=%6.3f'%(str(lr_upkeys),
+                                                               lr_mult))
+        
         model_base = package_lib.update_base_outputs(model_base,output_shape,
-                                                     optparams)
-    
+                                                     optparam=optparams)
+
+    if model_backend == 'tensorflow':
+        from keras.utils.training_utils import multi_gpu_model
+        from tensorflow import device as tfdevice
+        if num_gpus==1:
+            print('Building single-GPU tensorflow model')
+            # build and run on single GPU
+            with tfdevice("/gpu:0"):
+                model_base.build()
+        elif num_gpus > 1:
+            print('Building multi-GPU tensorflow model')
+            # build on the CPU, distribute to multiple GPUs
+            with tfdevice("/cpu:0"):
+                model_base.build()
+            
+            model_base = multi_gpu_model(model_base, gpus=num_gpus)
+
     model_params = package_lib.model_init(model_base,flavor,state_dir,
                                           optparams,**params)
+    model_params.setdefault('start_epoch',start_epoch)
+    model_params.setdefault('start_monitor',start_monitor)
+    model_params.setdefault('transpose',model_transpose)
+    model_params.setdefault('input_shape',input_shape)
     model = Model(**model_params)
     
-    if weightf:
-        model.initialized = True
-    else:
-        print('Compiling model')
-        model.compile()
-        
-    print('Model+functions compiled for package',package,'flavor',flavor)
+    model_png = pathjoin(model_dir,'model.png')
+    if pathexists(model_png):
+        os.remove(model_png) # delete the old png to avoid irritating warnings
+    try:
+        from keras.utils.vis_utils import plot_model        
+        plot_model(model.base, to_file=model_png, show_layer_names=True,
+                   show_shapes=True)
+        print('Saved model diagram to "%s"'%model_png)
+    except Exception as e:
+        warn('Unable to generate model diagram "%s" due to exception: %s'%(model_png,
+                                                                           str(e)))
+    print('Compiling',flavor,'model')
+
+    model.compile()
+    
+    model.initialized = True        
+    print('Model',flavor,'initialized')
     
     return model
 
