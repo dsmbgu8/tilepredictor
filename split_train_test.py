@@ -1,8 +1,8 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 import sys
 import numpy as np
-from load_data_caffe import *
-from util.aliases.python import *
+from load_data import *
+from pylib import *
 
 try:
     from sklearn.model_selection import train_test_split as tts, \
@@ -17,7 +17,7 @@ train_size=0.75
 random_state=42
 
 def loadlabs(labf,**kwargs):
-    X_images,y = load_labf(labf,**kwargs)
+    X_images,y,_,_ = load_data(labf,**kwargs)
     X = np.array(X_images.files)
     return X,y
 
@@ -111,6 +111,8 @@ if __name__ == '__main__':
     labf = args.labelfile
     k = int(args.num_splits)
     mode = args.mode
+    if k==1 and mode=='kfold':
+        mode='single'
 
     print('loading',labf)
     X,y = loadlabs(labf)
