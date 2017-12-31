@@ -20,9 +20,9 @@ def _parse_label_file(labelf,nmax=np.inf):
 
     return imglabs
 
-def _load_path(labelf,load_func,nmax=np.inf,asarray=False,check_paths=False,
-               conserve_memory=True,memory_slots=1,transpose=None,balance=False,
-               class_mode='categorical',exclude_pattern=None,mean_image=None):
+def load_file(labelf,load_func,nmax=np.inf,asarray=False,check_paths=False,
+              conserve_memory=True,memory_slots=1,transpose=None,balance=False,
+              class_mode='categorical',exclude_pattern=None,mean_image=None):
 
     #exclude_pattern = '/tn/'
     imglabs = _parse_label_file(labelf,nmax=nmax)
@@ -71,19 +71,9 @@ def _load_path(labelf,load_func,nmax=np.inf,asarray=False,check_paths=False,
         imgs = imgs.concatenate()
     labs = np.array(labs,dtype=np.int8)
     if class_mode=='categorical':
-        labs = labs.squeeze()
         labs = to_categorical(labs)
         
     return imgs, labs
-
-def compute_mean(X_train,X_test,meanf):
-    if pathexists(meanf):
-        return loadmat(meanf)['mean_image']
-    mean_image = np.sum(X_train,axis=0)+np.sum(X_test,axis=0)
-    mean_image /= X_train.shape[0]+X_test.shape[0]
-    
-    savemat({'mean_image':mean_image},meanf)
-    return mean_image
 
 def load_data(*args,**kwargs):
     nargs = len(args)
@@ -98,12 +88,12 @@ def load_data(*args,**kwargs):
 
     # only balance training set
     balance_train = kwargs.pop('balance_train',False)
-    train_set = [_load_path(args[0],balance=balance_train,**kwargs)]
+    data_sets = [load_file(args[0],balance=balance_train,**kwargs)]
 
     # test set(s)
-    test_sets = [_load_path(argi,**kwargs) for argi in args[1:]]
-                 
-    return train_set+test_sets
+    data_sets += [load_file(argi,**kwargs) for argi in args[1:]]
+    
+    return data_sets
 
 def load_image_data(train_file,test_file,**kwargs):
     load_func = kwargs.pop('load_func',None)
@@ -121,6 +111,7 @@ def load_image_data(train_file,test_file,**kwargs):
     exclude_pattern = kwargs.pop('exclude_pattern',None)
     mean_image = kwargs.pop('mean_image',None)
     class_mode = kwargs.pop('class_mode','categorical')
+    conserve_mem = kwargs.pop('conserve_memory',True)
     if train_file==test_file:
         warn('train_file==test_file, sampling test data from train_file')
         test_file = None
@@ -131,13 +122,14 @@ def load_image_data(train_file,test_file,**kwargs):
                                                   balance_train=False,
                                                   exclude_pattern=exclude_pattern,
                                                   mean_image=mean_image,
+                                                  conserve_memory=conserve_mem,
                                                   **kwargs)
     train_img_files = np.array(X_train.files)
     if y_train.ndim==1 or y_train.shape[1]==1:
         y_train = to_categorical(y_train)
 
     train_lab = to_binary(y_train)
-    nb_classes = y_train.shape[1]
+    n_classes = y_train.shape[1]
 
     if len(y_test)==0:
         msg='No test_file provided'
@@ -174,7 +166,7 @@ def load_image_data(train_file,test_file,**kwargs):
         train_img_files = np.r_[train_img_files,train_img_files[balance_idx]]
         y_train = np.r_[y_train,y_train[balance_idx]]
         print('Balanced %d classes by sampling %d images with '
-              'replacement'%(nb_classes,len(balance_idx)))
+              'replacement'%(n_classes,len(balance_idx)))
         train_lab = to_binary(y_train)
         
     X_train = imgfiles2collection(train_img_files,load_func,**kwargs)
@@ -188,13 +180,11 @@ def load_image_data(train_file,test_file,**kwargs):
             X_test = X_test.concatenate()
             #X_test,y_test = collect_batch(X_test,y_test,verbose=1)
 
-
     print("Training samples: {}, input shape: {}".format(len(X_train),X_train[0].shape))
-    print('Training classes:')
-    class_stats(train_lab,verbose=1)
+    print('Training classes: %s'%str(class_stats(train_lab)))
+
     print("Test samples: {}, shape: {}".format(len(X_test),X_test[0].shape))        
-    print('Test classes:')
-    class_stats(test_lab,verbose=1)
+    print('Test classes: %s'%str(class_stats(test_lab)))
     
     return (X_train,y_train,train_img_files),(X_test,y_test,test_img_files)
 

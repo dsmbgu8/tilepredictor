@@ -1,6 +1,6 @@
 from __future__ import absolute_import, division, print_function
 
-import sys,os
+import sys,os,json
 import threading
 
 from warnings import warn
@@ -14,23 +14,37 @@ image_bands = 3
 
 tile_dir = 'tiles'
 tile_ext = image_ext
+tile_dim = 256 # tile_dim = network input dim
 tile_bands = image_bands
 tile_id = 'det'
 
+tile_resize = 'resize'
 
-# tile_dim must match number of network input units
-#tile_dim = 200 
-tile_dim = 256
-
-tile_transpose = (0,1,2) # (2,0,1) -> (rows,cols,bands) to (bands,rows,cols)
+tile_transpose = [0,1,2] # [2,0,1] -> (rows,cols,bands) to (bands,rows,cols)
 
 # list of all imaginable tile prefixes
 tile_ids = ['det','rgb']
 tile_prefix = ['tp','tn','fp','fn','pos','neg']
 
+metrics_sort = ['precision','recall','fscore']
+
+ORDER_NEAREST = 0
+ORDER_LINEAR  = 1
+
 def is_collection(X):
     from skimage.io import ImageCollection
     return type(X)==ImageCollection
+
+def load_json(jsonf):
+    with open(jsonf,'r') as fid:
+        return json.load(fid)
+
+def save_json(jsonf,outdict,**kwargs):
+    kwargs.setdefault('indent',4)
+    kwargs.setdefault('sortkeys',True)
+    with open(jsonf,'w') as fid:
+        print(json.dumps(outdict,**kwargs),file=fid)
+
 
 def collect_tile_uls(tile_path,tile_id='det',tile_ext='.png'):
     """
@@ -75,6 +89,15 @@ def collect_tile_uls(tile_path,tile_id='det',tile_ext='.png'):
 
     tile_uls = map(tilefile2ul,tile_files)
     return tile_files, tile_uls
+
+def compute_mean(X_train,X_test,meanf):
+    if pathexists(meanf):
+        return loadmat(meanf)['mean_image']
+    mean_image = np.sum(X_train,axis=0)+np.sum(X_test,axis=0)
+    mean_image /= X_train.shape[0]+X_test.shape[0]
+    
+    savemat({'mean_image':mean_image},meanf)
+    return mean_image
 
 def collect_image_uls(img_test,tile_dim,tile_stride):
     from skimage.measure import label as imlabel
@@ -129,8 +152,7 @@ def generate_tiles(img_test,tile_uls,tile_dim):
         if tile_img.any():
             yield tile_img
 
-def generate_image_batch(img_test,tile_uls,tile_dim,batch_size,
-                         preprocess=None):
+def generate_image_batch(img_test,tile_uls,tile_dim,batch_size,preprocess=None):
     if preprocess is None:
         preprocess = lambda Xi: Xi
     n_test = len(tile_uls)
@@ -229,7 +251,8 @@ def class_stats(labs,verbose=0):
     npos = np.count_nonzero(_labs==1)
     nneg = np.count_nonzero(_labs!=1)
     if verbose:
-        print('npos=',npos,'nneg=',nneg)
+        print('%d labeled samples (#pos=%d, #neg=%d) samples'%(len(labs),
+                                                               npos,nneg))
     return npos,nneg
 
 def band_stats(X,n_bands=3,verbose=1):
@@ -252,7 +275,7 @@ def band_stats(X,n_bands=3,verbose=1):
     return bmin,bmax,bmean
 
 def to_binary(labs):
-    labssq = labs.squeeze()
+    labssq = labs.squeeze() if labs.shape[0] != 1 else labs
     assert(labssq.ndim==2 and labssq.shape[1]==2)
     return np.int8(np.argmax(labssq,axis=-1))
     
@@ -264,26 +287,134 @@ def to_categorical(labs):
     assert(len(ulabs)==2)
     return np.int8(np.c_[labssq==ulabs[0],labssq==ulabs[1]])
 
+def compute_predictions(model,X_test):
+    pred_outs = model.predict(X_test)
+    pred_labs = to_binary(pred_outs)
+    pred_prob = np.amax(pred_outs,axis=-1)
+    return dict(pred_outs=pred_outs,pred_labs=pred_labs,pred_prob=pred_prob)
+
+def compute_metrics(test_lab,pred_lab,pos_label=1,average='binary'):
+    from sklearn.metrics import precision_recall_fscore_support as _prfs
+    assert((test_lab.ndim==1) and (pred_lab.ndim==1))
+    prfs = _prfs(test_lab,pred_lab,average=average,pos_label=pos_label)
+    return dict(zip(['precision','recall','fscore'],prfs[:-1]))
+
+def fnrfpr(test_lab,prob_pos,fnratfpr=None,verbose=0):
+    assert((test_lab.ndim==1) and (prob_pos.ndim==1))
+
+    from scipy import interp
+    from sklearn.metrics import roc_curve
+    fprs, tprs, thresholds = roc_curve(test_lab, prob_pos)
+    fnrs = 1.0-tprs
+    optidx = np.argmin(fprs+fnrs)
+    optfpr,optfnr = fprs[optidx],fnrs[optidx]
+
+    fnratfprv = None
+    if fnratfpr:
+        fprs_interp = np.linspace(0.0, 1.0, 101)
+        fnrs_interp = interp(fprs_interp, fprs, fnrs)
+        fpr_deltas = np.abs(fprs_interp-fnratfpr)
+        delt_sorti = np.argsort(fpr_deltas)[:2]
+        fpr_deltas = fpr_deltas[delt_sorti]        
+        fnr_sort = fnrs_interp[delt_sorti]
+        if fpr_deltas[0]==0:
+            fnratfprv = fnr_sort[0]
+        else:
+            fpr_sort = fprs_interp[delt_sorti]            
+            fpr_diff = np.abs(fpr_sort.diff())
+            fpr_deltas_diff = fpr_deltas[0]/fpr_diff[0]
+            fnratfprv = ((1-fpr_deltas_diff) * fnr_sort[0]) + \
+                        (fpr_deltas_diff     * fnr_sort[1])
+        if verbose:
+            print('\n')
+            print('fnratfpr: "%s"'%str((fnratfpr)))
+            print('fpr_deltas: "%s"'%str((fpr_deltas)))
+            print('delt_sorti: "%s"'%str((delt_sorti)))
+            print('fnr_sort: "%s"'%str((fnr_sort)))
+            print('fnratfprv: "%s"'%str((fnratfprv)))
+            print('\n')
+
+    return optfpr,optfnr,fnratfprv
+
+def write_predictions(predf, test_ids, test_lab, pred_lab, pred_prob, pred_mets,
+                      fnratfpr=None, buffered=False):
+    assert(len(test_ids)==len(test_lab))
+    assert((pred_prob.ndim==1) and (pred_lab.ndim==1) and (test_lab.ndim==1))
+    
+    #pred_mets  = pred_mets or compute_metrics(test_lab,pred_lab)
+    mstr  = ', '.join(['%s=%9.6f'%(m,pred_mets[m]*100) for m in metrics_sort])
+
+    if fnratfpr:
+        # convert pred_prob values into probability of positive class
+        prob_pos = np.where(pred_lab==1,pred_prob,1.0-pred_prob)
+        optfpr,optfnr,fnratfprv = fnrfpr(test_lab,prob_pos,fnratfpr=fnratfpr)
+        mstr += '\n# fpr=%9.6f, fnr=%9.6f, fnr@%9.6f%%fpr=%.6f'%(optfpr*100,
+                                                               optfnr*100,
+                                                               fnratfpr*100,
+                                                               fnratfprv*100) 
+    
+    n_lab = len(test_ids)
+    m_err = test_lab!=pred_lab
+    pos_lab = test_lab==1
+
+    n_tp = np.count_nonzero(~m_err &  pos_lab)
+    n_tn = np.count_nonzero(~m_err & ~pos_lab)
+    n_fp = np.count_nonzero( m_err & ~pos_lab)
+    n_fn = np.count_nonzero( m_err &  pos_lab)    
+    n_acc,n_err = n_tp+n_tn, n_fp+n_fn
+    n_pos,n_neg = n_tp+n_fn, n_tn+n_fp
+    outstr = ['# %d samples: # %d correct, %d errors'%(n_lab,n_acc,n_err),
+              '# [tp=%d+fn=%d]=%d positive'%(n_tp,n_fn,n_pos) + \
+              ', [tn=%d+fp=%d]=%d negative'%(n_tn,n_fp,n_neg),
+              '# %s'%mstr, '#', '# id lab pred prob']
+    
+    with open(predf,'w') as fid:
+        if not buffered:
+            print('\n'.join(outstr),file=fid)        
+        for i,m_id in enumerate(test_ids):
+            labi,predi,probi = test_lab[i],pred_lab[i],pred_prob[i]
+            outstri = '%s %d %d %9.6f'%(str(m_id),labi,predi,probi*100)
+            if buffered:
+                outstr.append(outstri)
+            else:
+                print(outstri,file=fid)
+        if buffered:
+            print('\n'.join(outstr),file=fid)
+
+def prediction_summary(test_lab,pred_lab,metrics,npos,nneg,fscore,best_epoch):
+    assert((test_lab.ndim==1) and (pred_lab.ndim==1))
+
+    pred_mets = compute_metrics(test_lab,pred_lab)
+    pos_preds = pred_lab==1
+    neg_preds = pred_lab!=1
+    err_preds = pred_lab!=test_lab
+
+    nneg_preds = np.count_nonzero(neg_preds)
+    npos_preds = np.count_nonzero(pos_preds)
+    mtup = (npos,npos_preds,nneg,nneg_preds)
+
+    npos_mispred = np.count_nonzero(pos_preds & err_preds)
+    nneg_mispred = np.count_nonzero(neg_preds & err_preds)
+ 
+    mstr = ', '.join(['%s=%9.6f'%(m,pred_mets[m]*100) for m in metrics])
+    mstr += '\n     pos=%d, pos_pred=%d, neg=%d, neg_pred=%d'%mtup
+    mstr += '\n     mispred pos=%d, neg=%d'%(npos_mispred,nneg_mispred)
+    mstr += '\n     best fscore=%9.6f, epoch=%d'%(fscore*100,best_epoch)
+    return pred_mets,mstr
+            
 def imcrop(img,crop_shape):
     croprows,cropcols = crop_shape[0],crop_shape[1]
     nrows,ncols = img.shape[0],img.shape[1]
-    croph = max(0,(nrows-croprows)//2)
-    cropw = max(0,(ncols-cropcols)//2)
-    return img[croph:(nrows-croph),cropw:(ncols-cropw)]
+    r0,c0 = max(0,(nrows-croprows)//2),max(0,(ncols-cropcols)//2)
+    r1,c1 = r0+crop_shape[0],c0+crop_shape[1]
+    return img[r0:r1,c0:c1]
 
 def imresize(img,output_shape,**kwargs):
     from skimage.transform import resize as _imresize
-    kwargs.setdefault('order',0) 
-    kwargs.setdefault('clip',False)
+    kwargs.setdefault('order',ORDER_LINEAR) 
+    kwargs.setdefault('clip',True)
     kwargs.setdefault('preserve_range',True)
     return _imresize(img,output_shape,**kwargs)
-
-def imcrop(img,crop_shape):
-    croprows,cropcols = crop_shape[0],crop_shape[1]
-    nrows,ncols = img.shape[0],img.shape[1]
-    croph = max(0,(nrows-croprows)//2)
-    cropw = max(0,(ncols-cropcols)//2)
-    return img[croph:(nrows-croph),cropw:(ncols-cropw)]
 
 def imread_image(f,bands=3,dtype=np.uint8,plugin=None,verbose=0):
     from skimage.io import imread
@@ -331,14 +462,20 @@ def resize_tile(tile,tile_shape=[],resize='resize',dtype=np.uint8,verbose=0):
         coff = tile.shape[1]-tile_shape[1]
         r = 0 if roff<0 else randint(roff)
         c = 0 if coff<0 else randint(coff)
-        print('before extract',tile.shape)
-        tile = extract_tile(tile,(r,c),tile_shape[0])
-        print('after extract',tile.shape)
+        if r != 0 or c != 0:
+            tile = extract_tile(tile,(r,c),tile_shape[0])
+            
     elif resize=='crop':
         tile = imcrop(tile,tile_shape)
-
-    if resize=='resize':
-        tile = imresize(tile,tile_shape,preserve_range=True)
+        
+    elif resize=='zoom_crop':
+        # scale image by ratio of new vs. current size, crop into tile_shape
+        rs_shape = [int(tile.shape[i]*(tile_shape[i]/tile.shape[i]))
+                    for i in range(2)]
+        tile = imresize(tile,rs_shape)
+        tile = imcrop(tile,tile_shape)
+    else:
+        tile = imresize(tile,tile_shape)
         
     scalef = 255 if itype==float else 1
     tile = dtype(scalef*tile)
@@ -346,23 +483,21 @@ def resize_tile(tile,tile_shape=[],resize='resize',dtype=np.uint8,verbose=0):
         omin,omax = extrema(tile.ravel())
         otype = tile.dtype
         oshape = tile.shape
-        print('Before resize: '
+        print('Before resize (mode=%s): '
               'type=%s, shape=%s, '
-              'range = [%.3f, %.3f]'%(str(itype),str(ishape),imin,imax))
+              'range = [%.3f, %.3f]'%(resize,str(itype),str(ishape),imin,imax))
         print('After resize:  '
               'type=%s, shape=%s, '
-              'range = [%.3f, %.3f]'%(str(otype),str(oshape),omin,omax))    
+              'range = [%.3f, %.3f]'%(str(otype),str(oshape),omin,omax))
     return tile
 
-def imgfiles2collection(imgfiles,load_func,**kwargs):
+def imgfiles2collection(imgfiles,load_func,conserve_memory=True,**kwargs):
     from skimage.io import ImageCollection
-    kwargs.setdefault('conserve_memory',True)
-    imgs = ImageCollection(imgfiles,load_func=load_func,**kwargs)
-    return imgs
+    return ImageCollection(imgfiles,load_func=load_func,
+                           conserve_memory=True,**kwargs)
 
 def imgfiles2array(imgfiles,load_func,**kwargs):
-    imgs = imgfiles2collection(imgfiles,load_func,**kwargs)
-    return imgs.concatenate()
+    return imgfiles2collection(imgfiles,load_func,**kwargs).concatenate()
 
 def tilefile2ul(tile_imagef):
     tile_base = basename(tile_imagef)
@@ -599,6 +734,10 @@ def fill_batch(X_batch,y_batch,batch_size,balance=True):
     - y_aug: batch_size-n augmentation labels for X_aug
     
     """
+    # fill a partial batch with balanced+transformed inputs
+    if X_batch.ndim == 3: # filling with a single sample
+        X_batch = X_batch[np.newaxis]
+        y_batch = y_batch[np.newaxis]
 
     batch_lab = to_binary(y_batch)
     n_cur = len(y_batch)
@@ -675,19 +814,6 @@ def array2gen(a,nb):
     outshape = [-1]+list(a.shape[1:])
     for i in range(0,a.shape[0]+1,nb):
         yield a[i*nb:min((i+1)*nb,a.shape[0])].reshape(outshape)
-
-from keras.utils.data_utils import Sequence
-class WindowSequence(Sequence):
-    def __init__(self, x_set, batch_size):
-        self.x = x_set
-        self.batch_size = batch_size
-
-    def __len__(self):
-        return np.ceil(len(self.x) / self.batch_size)
-
-    def __getitem__(self, idx):
-        batch_x = self.x[idx * self.batch_size:(idx + 1) * self.batch_size]
-        return batch_x
         
 if __name__ == '__main__':
     # Binary values:      [0,1,1]

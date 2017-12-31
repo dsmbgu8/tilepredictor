@@ -1,9 +1,16 @@
 import numpy as np
 
-
 def load_model(modelf,**kwargs):
-    from keras.models import load_model as _load_model
-    return _load_model(modelf,**kwargs)
+    from keras.models import Sequential, load_model as _load_model
+    flatten = kwargs.pop('flatten',False)
+    model = _load_model(modelf,**kwargs)
+    if flatten and model.layers[0].name.startswith('sequential_'):
+        from keras.models import _clone_sequential_model
+        _model = _clone_sequential_model(model.layers[0])
+        for layer in model.layers[1:]:
+            _model.add(layer)
+        model = _model
+    return model
 
 def backend():
     from keras import backend as _backend
@@ -15,9 +22,10 @@ def update_base_outputs(model_base,output_shape,optparam,output_layer='fc'):
     from keras.regularizers import l2 as activity_l2
     from keras.constraints import max_norm as max_norm_constraint
 
-    nb_hidden,nb_classes = output_shape
-    print('Adding %d x %d relu hidden + softmax output layer'%(nb_hidden,
-                                                               nb_classes))
+    n_hidden,n_classes = output_shape
+    print('output_shape: "%s"'%str((output_shape)))
+    print('Adding %d x %d relu hidden + softmax output layer'%(n_hidden,
+                                                               n_classes))
 
     obj_lambda2 = optparam.get('obj_lambda2',0.0025)
     obj_param = dict(activity_regularizer=activity_l2(obj_lambda2))
@@ -25,20 +33,19 @@ def update_base_outputs(model_base,output_shape,optparam,output_layer='fc'):
     max_norm=optparam.get('max_norm',np.inf)
     if max_norm!=np.inf:
         obj_param['kernel_constraint']=max_norm_constraint(max_norm)
-    
-    model = Sequential()
-    model.add(model_base)
+        
+    model = Sequential(layers=model_base.layers)
 
     if output_layer=='fc':
-        model.add(Dense(nb_hidden, activation='relu'))
+        model.add(Dense(n_hidden, activation='relu'))
     else:
-        print('unknown output_layer "%s", using "fc"'%output_layer)
-        model.add(Dense(nb_hidden, activation='relu'))
+        print('Unknown output_layer "%s", using "fc"'%output_layer)
+        model.add(Dense(n_hidden, activation='relu'))
         
-    model.add(Dense(nb_classes, activation='softmax', **obj_param))
+    model.add(Dense(n_classes, activation='softmax', **obj_param))
 
-    model.nb_base_layers = len(model_base.layers)
-    model.nb_top_layers = len(model.layers)-model.nb_base_layers
+    model.n_base_layers = len(model_base.layers)
+    model.n_top_layers = len(model.layers)-model.n_base_layers
     
     return model
 

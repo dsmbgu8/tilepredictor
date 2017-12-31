@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 from __future__ import division, print_function, absolute_import, unicode_literals
-
 import sys
 from glob import glob
 
@@ -12,6 +11,10 @@ sys.path.append(abspath(tilepredictor_home))
 from imtiler.imtiler.util import *
 from tilepredictor_util import *
 from model_package import *
+
+from windowsequence import WindowSequence
+
+default_load_func = 'tilepredictor_util.imread_image'
 
 test_epoch = 1
 save_epoch = 1
@@ -206,17 +209,20 @@ def write_csv(csvf,imgid,pred_list,tile_dim,prob_thresh=0.0,img_map=None):
     print('saved',csvf) 
 
 def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
-                   img_map=None, lab_mask=[], scale_probs=scale_probs,
-                   verbose=False, transpose=False, do_show=False):
+                   img_map=None, preprocess=None, backend='tensorflow',
+                   lab_mask=[], verbose=0, transpose=False, do_show=False):
     from skimage.util.shape import view_as_windows
-    input_shape = model.layers[0].input_shape 
-    if model.backend=='tensorflow':
+    preprocess = preprocess or preprocess_img_u8
+    input_shape = model.layers[0].input_shape
+    if backend=='tensorflow':
         # channels last
         tile_dim,tile_bands = input_shape[2],input_shape[3]
-    elif model.backend=='theano':
+        tile_transpose = [0,1,2]
+    elif backend=='theano':
         # channels first
         tile_dim,tile_bands = input_shape[2],input_shape[1]
-
+        tile_transpose = [2,0,1]
+        
     assert(tile_bands == img_data.shape[-1])
         
     if tile_stride >= 1:
@@ -263,9 +269,7 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     tdims  = [tile_dim,tile_dim]
     tshape = tdims+[bands]
     rshape = [-1]+tshape
-    rtranspose = None
-    if model.transpose:
-        rtranspose = [0]+[d+1 for d in model.transpose]
+    rtranspose = [0]+[d+1 for d in tile_transpose]
 
     rrange = np.arange(0,rows-tile_dim+1,stride)
     crange = np.arange(0,cols-tile_dim+1,stride)
@@ -283,63 +287,74 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     inittime = gettime()
     preptime,predtime,posttime = 0.,0.,0.
     pbar = progressbar(pmsg,n_rb)
+    zimg = preprocess(np.zeros([1,tile_dim,tile_dim,3],dtype=np.uint8))
+    zprob = model.predict(zimg.transpose(rtranspose))
+    zpred = np.int8(to_binary(zprob))
+    print(zprob,zpred)
+
     for rbeg in pbar(rrange):
         preptime = gettime()
         rend = rbeg+tile_dim
 
         rwin = view_as_windows(img_rgb[rbeg:rend], tshape, step=stride)
+        rwin = rwin.reshape([-1,tile_dim,tile_dim,3])
         # only keep tiles that contain nonzero values
         #rmask[:] = rwin.reshape(rwin.shape[0],-1).any(axis=1)
-        #if (rmask==0).all():
-        #    continue
 
-        # nkeep = np.count_nonzero(rmask)
-        # rinput = [nkeep,tile_shape,tile_shape,3]
-        # rwini = rwin[rmask]
-        rinput = model.preprocess(rwin.reshape(rshape))
-        if rtranspose:
+        nkeep = np.count_nonzero(rmask)
+        if nkeep!=0:
+            rshapei = [nkeep,tile_dim,tile_dim,3]
+            rwini = rwin[rmask]
+            rinput = preprocess(rwini.reshape(rshapei))        
             rinput = rinput.transpose(rtranspose)
-        preptime += (gettime()-preptime)
-        
-        predtime = gettime()
-        # probi = [nkeep,2] softmax class probabilities
-        #probi = model.predict(rinput,batch_size=min(nkeep,n_cb))
-        rprob = model.predict(rinput)
-        rpred = np.int8(to_binary(rprob))
-        
-        #rprob = rprob.reshape([rstep,-1,2])
-        #rpred = rpred.reshape([rstep,-1])
-        #rwseq = WindowSequence(rinput,batch_size=rinput.shape[0]//stride)        
-        #probi = model.base.predict_generator(rwseq,stride)
-        predtime += (gettime()-predtime)
+            preptime += (gettime()-preptime)
 
-        posttime = gettime()
-        # predi = [nkeep,1] softmax class predictions
+            predtime = gettime()
+            # probi = [nkeep,2] softmax class probabilities
+            rprob = model.predict(rinput)
+            
+            #rprob = rprob.reshape([rstep,-1,2])
+            #rpred = rpred.reshape([rstep,-1])
+            #rsize = 32 #rinput.shape[0]/stride
+            #rstep = rinput.shape[0]/rsize
+            #rwseq = WindowSequence(rinput,batch_size=rsize)        
+            #rprob = model.predict_generator(rwseq,rstep)
 
-        # if scale_probs:
-        #     ckeep = cidx[:nkeep]
-        #     probi[ckeep,predi] = 2*(probi[ckeep,predi]-0.5)
-        #     probi[ckeep,1-predi] = 1-probi[ckeep,predi]
+            rpred = np.int8(to_binary(rprob))
+            predtime += (gettime()-predtime)
 
-        # probwin = view_as_windows(img_prob[rbeg:rend], tdims+[2], step=stride).squeeze()
-        # predwin = view_as_windows(img_pred[rbeg:rend], tdims+[1], step=stride).squeeze()        
+            posttime = gettime()
+            # predi = [nkeep,1] softmax class predictions
 
-        # probwin = probwin.swapaxes(1,3)
-        # predwin = predwin.swapaxes(1,3)
-        # probwin[cidx[rmask]] = probi
+            # if scale_probs:
+            #     ckeep = cidx[:nkeep]
+            #     probi[ckeep,predi] = 2*(probi[ckeep,predi]-0.5)
+            #     probi[ckeep,1-predi] = 1-probi[ckeep,predi]
 
-        # if print_state and (i%10)==0:
-        #     print('prediction time: %0.3f seconds'%(gettime()-begtime))
-        #     print('row block %d of %d'%(i,n_rb))
+            # probwin = view_as_windows(img_prob[rbeg:rend], tdims+[2], step=stride).squeeze()
+            # predwin = view_as_windows(img_pred[rbeg:rend], tdims+[1], step=stride).squeeze()        
 
-        # crangei = crange[rmask]
-        
+            # probwin = probwin.swapaxes(1,3)
+            # predwin = predwin.swapaxes(1,3)
+            # probwin[cidx[rmask]] = probi
 
+            # if print_state and (i%10)==0:
+            #     print('prediction time: %0.3f seconds'%(gettime()-begtime))
+            #     print('row block %d of %d'%(i,n_rb))
+
+        pj = 0
         for j,cbeg in enumerate(crange):
-            cend = cbeg+tile_dim            
-            img_prob[rbeg:rend,cbeg:cend,:] += rprob[j]
-            img_pred[rbeg:rend,cbeg:cend,rpred[j]] += 1
-            pred_list.append([rbeg,cbeg,rprob[j,1]])
+            cend = cbeg+tile_dim
+            if rmask[j]:
+                img_prob[rbeg:rend,cbeg:cend,:] += rprob[pj]
+                img_pred[rbeg:rend,cbeg:cend,rpred[pj]] += 1
+                pred_list.append([rbeg,cbeg,rprob[pj,1]])
+                pj+=1
+            else:
+                img_prob[rbeg:rend,cbeg:cend,:] += zprob[0]
+                img_pred[rbeg:rend,cbeg:cend,zpred] += 1
+                pred_list.append([rbeg,cbeg,zprob[0,1]])
+                
 
         posttime += (gettime()-posttime)
 
@@ -440,9 +455,8 @@ if __name__ == '__main__':
     parser.add_argument("-o", "--output_dir", type=str,
                         help="Path to save output images/metadata (default=state_dir)")
 
-    module_func = 'tilepredictor_util.imread_image'
-    parser.add_argument("--load_func", help="Image loader function (default=%s)"%module_func,
-                        type=str,default=module_func)    
+    parser.add_argument("--load_func", help="Image loader function (default=%s)"%default_load_func,
+                        type=str,default=default_load_func)
     
     
     parser.add_argument("-w", "--weight_file", type=str,
@@ -459,7 +473,7 @@ if __name__ == '__main__':
     parser.add_argument("--train_file", help="Training data file", type=str)    
     parser.add_argument("--test_file", help="Test data file", type=str)
     parser.add_argument("--mean_file", help="Mean image data file", type=str)
-
+    parser.add_argument("--datagen_file", help="Data generator parameter file", type=str)
 
     parser.add_argument("--test_epoch", type=int, default=test_epoch,
                         help="Epochs between testing (default=%d)"%test_epoch)
@@ -486,11 +500,15 @@ if __name__ == '__main__':
     
     parser.add_argument("--tile_stride", type=float, default=0.5,
                         help="Tile stride (# pixels or percentage of tile_dim) for salience map generation (default=0.5)")
+    parser.add_argument("--tile_bands", type=int, default=tile_bands,
+                        help="Number of bands in each tile image (default=%d)"%tile_bands)
     parser.add_argument("--tile_dir", type=str,
                         help="Path to directory containing precomputed tiles for each image in image_dir")
     parser.add_argument("-p","--plot", action='store_true',
                         help="Plot salience outputs")
 
+    parser.add_argument("--resize", type=str, default=tile_resize,
+                        help="Method to resize images (default=%s)"%tile_resize)
     
     # misc
     parser.add_argument("--pred_best", action='store_true',
@@ -526,12 +544,13 @@ if __name__ == '__main__':
 
     model_package = args.model_package
     model_flavor  = args.model_flavor
+    
     tile_dim      = args.tile_dim
     batch_size    = args.batch_size
     test_file     = args.test_file
 
     mean_file     = args.mean_file
-
+    datagen_file  = args.datagen_file
     test_epoch    = args.test_epoch
     test_percent  = args.test_percent
     save_epoch    = args.save_epoch
@@ -549,6 +568,8 @@ if __name__ == '__main__':
     img_pattern   = args.image_load_pattern 
     tile_dir      = args.tile_dir
     tile_stride   = args.tile_stride
+    tile_bands    = args.tile_bands
+    tile_resize   = args.resize
         
     pred_best     = args.pred_best
     module_func   = args.load_func
@@ -576,16 +597,16 @@ if __name__ == '__main__':
 
     if pred_best:
         save_preds = True
-        model_weight_dir = pathjoin(state_dir,model_package,model_flavor,'*.h5')
+        
 
-    model = compile_model(input_shape,output_shape,
+    n_classes = 2
+    model = compile_model(input_shape,n_classes,
                           model_state_dir=state_dir,
                           model_flavor=model_flavor,
                           model_package=model_package,
                           model_weightf=model_weightf,
                           num_gpus=num_gpus)
 
-    # convert the mudule_func string to an actual python function 
     load_func = import_load_func(module_func)
     
     def preprocess_tile(img,model=model,doplot=False,verbose=0):
@@ -606,7 +627,7 @@ if __name__ == '__main__':
     def load_tile(tilef,tile_shape=tile_shape,verbose=debug):
         tile = load_func(tilef,verbose=verbose)
         if tile.shape[:2] != tile_shape:
-            tile = resize_tile(tile,tile_shape=tile_shape)
+            tile = resize_tile(tile,tile_shape=tile_shape,resize=tile_resize)
         return preprocess_tile(tile,verbose=verbose)
 
     if train_file or test_file:
@@ -621,8 +642,8 @@ if __name__ == '__main__':
                 
         train_data,test_data = load_data.load_image_data(train_file,test_file,
                                                          **loadparams)
-        (X_train,y_train,train_images) = train_data
-        (X_test,y_test,test_images) = test_data
+        (X_train,y_train,train_image_files) = train_data
+        (X_test,y_test,test_image_files) = test_data
         
         assert((y_train.ndim == 2) and (y_train.shape[1]==2))
         assert((y_test.ndim == 2) and (y_test.shape[1]==2))
@@ -630,29 +651,27 @@ if __name__ == '__main__':
         validation_data = (X_test,y_test)
                   
         if train_file:
+            if datagen_file:
+                datagen_params = load_datagen_params(datagen_file,verbose=1)
+            else:
+                datagen_params = train_datagen_params
+            
             #train_gen = self.imaugment_batches(X_train,y_train,n_batches)
             train_gen = datagen_arrays(X_train,y_train,batch_size,
-                                       datagen_params=train_datagen_params,
+                                       datagen_params=datagen_params,
                                        fill_partial=True,shuffle=True,
                                        verbose=2)
 
-            callback_params=dict(nb_epochs=nb_epochs,
-                                 monitor='val_loss',
+            n_batches = len(X_train)//batch_size           
+            callback_params=dict(monitor='val_loss',
                                  save_epoch=save_epoch,
                                  save_preds=save_preds,
                                  save_model=save_model,
-                                 test_epoch=test_epoch)
-            model.init_callbacks(**callback_params)
-            model.update_validation_callback(validation_data[0],
-                                             validation_data[1],
-                                             test_images)
-            n_batches = len(X_train)//batch_size
-            print(', '.join(['Training network for %d epochs'%nb_epochs,
-                             'batch size=%d'%batch_size,
-                             'batches/epoch=%d'%n_batches]))            
-            model.train(train_gen,nb_epochs,n_batches,
+                                 test_epoch=test_epoch,
+                                 test_ids=test_image_files)
+            model.train(train_gen,n_epochs,n_batches,
                         validation_data=validation_data,
-                        **callback_params)
+                        verbose=1,**callback_params)
 
     if not model.initialized:
         print('Error: model not sucessfully initialized')
@@ -667,18 +686,15 @@ if __name__ == '__main__':
         msg += '%d (#pos=%d, #neg=%d) samples'%(n_test,n_pos,n_neg)
         print(msg)
 
-        pred_out = compute_predictions(model,X_test,nb_classes,batch_size,
-                                       scale_probs=scale_probs,
-                                       preprocess=False)
+        pred_dict = compute_predictions(model,X_test)
 
-        pred_lab = pred_out['pred_lab']
-        pred_prob = pred_out['pred_prob']
+        pred_labs = pred_dict['pred_labs']
+        pred_prob = pred_dict['pred_prob']
 
-        pred_mets = compute_metrics(to_binary(y_test),pred_lab)
+        pred_mets = compute_metrics(to_binary(y_test),pred_labs)
         pred_file = splitext(test_file)[0]+'_pred.txt'
         write_predictions(pred_file, test_img_files, to_binary(y_test),
-                          pred_lab, pred_prob, pred_mets, fnratfpr=0.01,
-                          buffered=False)
+                          pred_labs, pred_prob, pred_mets, fnratfpr=0.01)
         print('Saved test predictions to "%s"'%pred_file)
 
     if img_dir:
@@ -739,9 +755,10 @@ if __name__ == '__main__':
             salience_out = image_salience(model,img_data,tile_stride,
                                           output_dir,
                                           img_output_prefix,
+                                          preprocess=model.preprocess,
+                                          backend=model.backend,
                                           lab_mask=lab_mask,
                                           img_map=img_map,
-                                          scale_probs=scale_probs,
                                           verbose=verbose,
                                           do_show=do_show)
 

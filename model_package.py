@@ -1,4 +1,4 @@
-from __future__ import absolute_import, division, print_function, unicode_literals
+from __future__ import absolute_import, division, print_function
 import sys
 import time
 gettime = time.time
@@ -10,20 +10,11 @@ pyext=expanduser('~/Research/src/python/external')
 #sys.path.insert(0,pathjoin(pyext,'keras204/build/lib'))
 #sys.path.insert(0,pathjoin(pyext,'keras207/build/lib'))
 #sys.path.insert(0,pathjoin(pyext,'keras208/build/lib'))
-sys.path.insert(0,pathjoin(pyext,'keras-multiprocess-image-data-generator'))
+#sys.path.insert(0,pathjoin(pyext,'keras-multiprocess-image-data-generator'))
 sys.path.insert(0,pathjoin(pyext,'CLR'))
 
-from pylib.dnn import *
-
-try:
-    from clr_callback import CyclicLR
-    use_clr = True
-except:
-    print('Could not import CyclicLR callback!')
-    use_clr = False
-    raw_input()
-    
 from tilepredictor_util import *
+
 
 tilepredictor_path = abspath(pathsplit(__file__)[0])
 valid_packages = ['keras']
@@ -49,40 +40,37 @@ scale_probs = True
 randomize = False
 
 # network architecture / training parameters
-nb_hidden = 1024 # nodes in last FC layer before classification
-nb_classes = 2 # we currently only consider binary classification problems 
-output_shape = [nb_hidden,nb_classes]
+default_n_hidden = 1024 # nodes in last FC layer before classification
+default_n_classes = 2 # we currently only consider binary classification problems 
 
 # optimizer parameters
-nb_epochs = 5000
 batch_size = 32
-nb_workers = 1
+n_epochs = 2000
+n_batches = n_epochs//batch_size
+
+
+use_multiprocessing = False
+n_workers = 5
+
 random_state = 42
 tol = 1e-8
 optparams = dict(
     weight_decay = 1e-6,
     reduce_lr = 0.1,
-    step_lr = 100,
     beta_1 = 0.9,
     beta_2 = 0.999,
-    lr_base = 0.0001,
-    lr_max = 0.001,
+    lr_base = 1e-5,
+    lr_max = 1e-2,
     obj_lambda2 = 0.0025,
     max_norm = np.inf, # 5.0
     tol = tol,
-    stop_delta = 0.001
+    stop_delta = 1e-3
 )
 
 train_rot_range=180.0
 train_shear_range=10.0 # shear degrees
 train_shift_range=0.1 # percentage of rows/cols to shift
-train_zoom_range=0.1 # range = (1-zoom,1+zoom)
-train_imaugment_params = dict(
-    zoom_range = (1.0-train_zoom_range, 1.0+train_zoom_range),
-    rotation_range = (-train_rot_range, train_rot_range),
-    shear_range = (-train_shear_range, -train_shear_range),
-    translation_range = (-train_shift_range, train_shift_range),
-)
+train_zoom_range=0.1 # range = (1-zoom,1+zoom) percent
 
 train_datagen_params = dict(featurewise_center=False,
                             samplewise_center=False,
@@ -101,16 +89,28 @@ train_datagen_params = dict(featurewise_center=False,
                             rescale=None,
                             preprocessing_function=None)
 
+def load_datagen_params(paramf='train_datagen_params.json',verbose=0):
+    if verbose:
+        print('Loading datagen parameters from file "%s"'%paramf)
+    return load_json(paramf)
+
+def save_datagen_params(paramf='train_datagen_params.json',verbose=0,
+                        datagen_params=train_datagen_params,**kwargs):
+    if verbose:
+        print('Saving datagen parameters to file "%s"'%paramf)    
+    return save_json(paramf,datagen_params,**kwargs)
+        
 @threadsafe_generator
 def datagen_arrays(X,y,batch_size,datagen_params=train_datagen_params,
-                   shuffle=True,fill_partial=True,
-                   random_state=random_state,verbose=0,
-                   preprocessing_function=None):
+                   shuffle=True,fill_partial=False,random_state=random_state,
+                   preprocessing_function=None,verbose=0):
+                   
     from keras.preprocessing.image import ImageDataGenerator
     
     # only call datagen.fit() if these keys are present
-    fit_kw = ['zca_whitening','featurewise_center',
-              'featurewise_std_normalization']
+    fit_kw = ['featurewise_center',
+              'featurewise_std_normalization',
+              'zca_whitening']
         
     flowkw = dict(batch_size=batch_size,shuffle=shuffle,seed=random_state,
                   save_to_dir=None,save_prefix='',save_format='png')
@@ -118,26 +118,24 @@ def datagen_arrays(X,y,batch_size,datagen_params=train_datagen_params,
     datagen = ImageDataGenerator(**datagen_params)
     # only fit datagen if one of the fit keys is true
     if any([datagen_params.get(key,False) for key in fit_kw]):
-        print('Fitting ImageDataGenerator for %d samples (this could take awhile)'%len(X))
+        print('Fitting ImageDataGenerator for %d samples (this could take some time)'%len(X))
         fittime = gettime()
         datagen.fit(X,seed=random_state)
-        print('Fit complete, processing time: %0.3f seconds'%gettime()-fittime)
+        fittime = gettime()-fittime
+        print('Fit complete, processing time: %0.3f seconds'%fittime)
     transform = datagen.random_transform
     datagen_iter = datagen.flow(X,y,**flowkw)
     for bi, (X_batch, y_batch) in enumerate(datagen_iter):
-        bi_collection = is_collection(X_batch)
-        if bi_collection:
+        if is_collection(X_batch):
+            warn('ImageDataGenerator generates ImageCollections, concatenating')
             X_batch = X_batch.concatenate()
-        
-        if fill_partial and X_batch.shape[0] < batch_size:
-            # fill a partial batch with balanced+transformed inputs
-            X_fill,y_fill = fill_batch(X_batch,y_batch,batch_size,
-                                       balance=True)
+
+        if fill_partial and X_batch.ndim==4 and X_batch.shape[0] < batch_size:
+            X_fill,y_fill = fill_batch(X_batch,y_batch,batch_size,balance=True)
             X_batch = np.r_[X_batch,map(transform,X_fill)]
             y_batch = np.r_[y_batch,y_fill]
         if verbose>1 and bi==0:
-            print('\n\nBatch %d: '%bi,
-                  'is_collection: %s,'%str(bi_collection),
+            print('\nBatch %d: '%bi,
                   'X_batch.shape: %s,'%str(X_batch.shape),
                   'y_batch.shape: %s'%str(y_batch.shape))
             band_stats(X_batch,verbose=1)
@@ -148,11 +146,9 @@ def datagen_arrays(X,y,batch_size,datagen_params=train_datagen_params,
 @threadsafe_generator
 def datagen_directory(path,target_size,batch_size,
                       datagen_params=train_datagen_params,
-                      classes=None,class_mode='categorical',                      
-                      shuffle=True,fill_partial=True,
-                      random_state=random_state,
-                      preprocessing_function=None,
-                      verbose=0):
+                      classes=None,class_mode='categorical',
+                      shuffle=True,fill_partial=False,verbose=0,
+                      preprocessing_function=None, random_state=random_state):
     from keras.preprocessing.image import ImageDataGenerator
 
     # only call datagen.fit() if these keys are present
@@ -177,10 +173,14 @@ def datagen_directory(path,target_size,batch_size,
         if bi_collection:
             X_batch = X_batch.concatenate()
         
-        if fill_partial and X_batch.shape[0] < batch_size:
+        if fill_partial and X_batch.ndim==4 and X_batch.shape[0] < batch_size:
             # fill a partial batch with balanced+transformed inputs
             X_fill,y_fill = fill_batch(X_batch,y_batch,batch_size,
                                        balance=True)
+            if X_fill.ndim == X_batch.ndim-1: # filling with a single sample
+                X_fill = X_fill[np.newaxis]
+                y_fill = y_fill[np.newaxis]
+            
             X_batch = np.r_[X_batch,map(transform,X_fill)]
             y_batch = np.r_[y_batch,y_fill]
         if verbose>1 and bi==0:
@@ -252,12 +252,14 @@ class Model(object):
         self.state_dir     = kwargs['state_dir']
         self.load_base     = kwargs['load_base']
 
-        self.callbacks     = []
+        self.pid           = kwargs['pid']
         self.start_epoch   = kwargs['start_epoch']
         self.start_monitor = kwargs['start_monitor']
         self.transpose     = kwargs['transpose']
+        self.val_monitor   = kwargs['val_monitor']
 
-        self.val_monitor   = 'val_loss'
+        self.callbacks     = []
+        
         self.val_type      = self.val_monitor.replace('val_','')
         self.val_best      = None
         self.val_cb        = None
@@ -305,8 +307,12 @@ class Model(object):
         self.base.compile(**self.params)
     
     def save(self,modelf,**kwargs):
+        basef,ext = splitext(modelf)
+        weightf = basef+'.h5'
+        classf = basef+'.json'
         kwargs.setdefault('overwrite',True)
-        self.base.save(modelf,**kwargs)
+        save_json(classf,self.__dict__)
+        self.base.save(weightf,**kwargs)
     
     def load(self,modelf,**kwargs):
         self.start_epoch, self.start_monitor = parse_model_meta(modelf)
@@ -321,23 +327,19 @@ class Model(object):
         self.base.load_weights(weightf,**kwargs)
         self.initialized = True
 
-    def update_validation_callback(self,test_data,test_labs,test_ids,**kwargs):
-        if not self.val_cb:
-            warn('validation callback not initialized')
-            return
-
-        self.val_cb.update_data(test_data,test_labs,test_ids,**kwargs)            
-
-    def init_callbacks(self,nb_epochs=nb_epochs,**kwargs):
+    def init_callbacks(self,n_epochs=n_epochs,n_batches=n_batches,**kwargs):
         from keras.callbacks import TerminateOnNaN, EarlyStopping, \
             ReduceLROnPlateau, CSVLogger, TensorBoard
         from validation_checkpoint import ValidationCheckpoint
-        
+        from clr_callback import CyclicLR
+
+        print('Initializing model callbacks')
+        use_tensorboard = kwargs.pop('use_tensorboard',False)
         val_monitor = kwargs.pop('monitor','val_loss')
-        step_lr = kwargs.pop('step_lr',optparams['step_lr'])
-        step_lr = step_lr or min(100,max(1,int(nb_epochs*0.01)))
-        stop_early = kwargs.pop('stop_early',max(10*step_lr,int(nb_epochs*0.2)))
-        
+        stop_early = kwargs.pop('stop_early',int(n_epochs*0.2))
+        step_lr = kwargs.pop('step_lr',None)
+        clr_loop = kwargs.pop('clr_loop',None)
+
         # strides to test/save model during training        
         test_epoch = kwargs.pop('test_epoch',1)
         save_epoch = kwargs.pop('save_epoch',1)
@@ -350,67 +352,90 @@ class Model(object):
         
         model_dir = self.model_dir
         initial_monitor = self.start_monitor
+        initial_epoch = self.start_epoch
         
         # configure callbacks
-        train_logf = pathjoin(model_dir,'training_log.csv')
         val_mode = 'auto'
+
+        ctimestr = epoch2str(gettime())
+    
+        train_logf = pathjoin(model_dir,'training_log_%s_pid%d.csv'%(ctimestr,
+                                                                     self.pid))
+        # if pathexists(train_logf) and pathsize(train_logf) != 0:
+        #     #ctimestr = epoch2str(gettime())
+        #     #ctimestr = epoch2str(pathctime(train_logf))
+        #     ctimestr = '1'
+        #     logf_base,logf_ext = splitext(train_logf)
+        #     old_logf = logf_base+'_'+ctimestr+logf_ext
+        #     print('Backing up existing log file "%s" to "%s"'%(train_logf,old_logf))
+        #     os.rename(train_logf,old_logf)
 
         self.val_monitor = val_monitor
         self.save_preds = save_preds
         self.save_model = save_model
         self.val_period = save_epoch
-        self.verbose_callbacks = verbose
             
         self.val_cb = ValidationCheckpoint(val_monitor=val_monitor,
                                            save_best_preds=save_preds,
                                            save_best_model=save_model,
                                            model_dir=model_dir,
-                                           mode=val_mode,
+                                           mode=val_mode,pid=self.pid,
                                            initial_monitor=initial_monitor,
+                                           initial_epoch=initial_epoch,
                                            period=save_epoch, verbose=verbose)
         #self.val_cb = ModelCheckpoint(model_iterf,monitor=val_monitor,mode=val_mode, period=save_epoch,
         #                        save_best_only=True, save_weights_only=False,                                
         #                        verbose=False)
-        if use_clr:
-            self.lr_cb = CyclicLR(base_lr=optparams['lr_base'],
-                                  max_lr=optparams['lr_max'],
-                                  step_size=step_lr)
-        else:
-            self.lr_cb = ReduceLROnPlateau(monitor=val_monitor,
-                                           mode=val_mode,
-                                           patience=step_lr,
-                                           min_lr=optparams['lr_base'],
-                                           factor=optparams['reduce_lr'],
-                                           epsilon=optparams['tol'],
-                                           verbose=verbose)
+        step_lr = step_lr or int(n_batches*4)
+        self.lr_cb = CyclicLR(base_lr=optparams['lr_base'],
+                              max_lr=optparams['lr_max'],
+                              step_size=step_lr,
+                              loop=clr_loop)
+        # else:
+        #     step_lr = step_lr or min(100,int(n_epochs*0.01))
+        #     self.lr_cb = ReduceLROnPlateau(monitor=val_monitor,
+        #                                    mode=val_mode,
+        #                                    patience=step_lr,
+        #                                    min_lr=optparams['lr_base'],
+        #                                    factor=optparams['reduce_lr'],
+        #                                    epsilon=optparams['tol'],
+        #                                    verbose=verbose)
         
         self.es_cb = EarlyStopping(monitor=val_monitor, patience=stop_early,
-                                   mode=val_mode, min_delta=optparams['stop_delta'],
-                                   verbose=verbose)
+                                   min_delta=optparams['stop_delta'],
+                                   mode=val_mode, verbose=verbose)
         self.tn_cb = TerminateOnNaN()
-        if pathexists(train_logf) and pathsize(train_logf) != 0:
-            ctimestr = epoch2str(pathctime(train_logf))
-            logf_base,logf_ext = splitext(train_logf)
-            old_logf = logf_base+'_'+ctimestr+logf_ext
-            print('Backing up existing log file "%s" to "%s"'%(train_logf,old_logf))
-            os.rename(train_logf,old_logf)
+
         
         self.cv_cb = CSVLogger(filename=train_logf,append=True)
-        self.callbacks = [self.val_cb,self.lr_cb,self.es_cb,self.tn_cb,self.cv_cb]
+        self.callbacks = [self.val_cb,self.lr_cb,self.es_cb,
+                          self.tn_cb,self.cv_cb]
 
-        use_tb = False
-        if use_tb:
+        if self.backend=='tensorflow' and use_tensorboard:
             tb_batch_size=32
-            tb_freq = 10
-            tb_log_dir = pathjoin(model_dir,'tb_logs')
-            self.tb_cb = TensorBoard(log_dir=tb_log_dir, histogram_freq=tb_freq,
-                                batch_size=tb_batch_size,
-                                write_graph=True, write_grads=True,
-                                write_images=True, embeddings_freq=0,
-                                embeddings_layer_names=None,
-                                embeddings_metadata=None)
+            tb_histogram_freq = 1
+            tb_embeddings_freq = 0
+            tb_log_dir = pathjoin(model_dir,'tb_logs_pid%d'%self.pid)
+            if not pathexists(tb_log_dir):
+                os.makedirs(tb_log_dir)
+            
+            self.tb_cb = TensorBoard(log_dir=tb_log_dir,
+                                     histogram_freq=tb_histogram_freq,
+                                     batch_size=tb_batch_size,
+                                     write_graph=True,
+                                     write_grads=True,
+                                     write_images=True,
+                                     embeddings_freq=tb_embeddings_freq,
+                                     embeddings_layer_names=None,
+                                     embeddings_metadata=None)
             self.callbacks.append(self.tb_cb)
-                
+        elif self.backend!='tensorflow' and use_tensorboard:
+            print('Cannot use tensorboard with backend "%s"'%self.backend)
+            use_tensorboard=False
+
+        print('Initialized %d callbacks:'%len(self.callbacks),
+              str(self.callbacks))
+    
     def write_mispreds(self, outf, mispred_ids):
         n_mispred=len(mispred_ids)
         if n_mispred==0:
@@ -419,74 +444,52 @@ class Model(object):
             print('# %d mispreds'%n_mispred,file=fid)
             for i,m_id in enumerate(mispred_ids):
                 print('%s'%(str(m_id)),file=fid)
-
-    def imaugment_batches(self,X_train,y_train,n_batches,
-                         random_state=random_state):
-        from sklearn.model_selection import StratifiedShuffleSplit        
-        
-        batch_transpose = [0]+[i+1 for i in self.transpose]
-            
-        # compute batch size wrt number of augmented samples
-        batch_size = int(len(X_train)/n_batches)
-        #batch_step = max(3,int(n_batches/10))
-        #test_batch = int(n_batches // batch_step)
-        #test_batch_idx = np.linspace(test_batch,n_batches-test_batch,batch_step)                
-        #test_batch_idx = np.unique(np.round(test_batch_idx))
-        split_state = random_state
-        try:
-            while(1):
-                sss = StratifiedShuffleSplit(n_splits=n_batches,
-                                             train_size=batch_size,
-                                             random_state=split_state)
-                split_state = split_state+1
-                X_batch,y_batch = [],[]
-                X_train_batch,y_train_batch = [],[]
-                for bi,(batch_idx,_) in enumerate(sss.split(y_train,y_train)):                
-                    X_batch,y_batch = collect_batch(X_train,y_train,
-                                                    batch_idx=batch_idx,
-                                                    imgs_out=X_batch,
-                                                    labs_out=y_batch)
-
-                    X_train_batch,y_train_batch = imaugment_perturb(X_batch,y_batch,
-                                                                    imgs_out=X_train_batch,
-                                                                    labs_out=y_train_batch)
-
-                    yield X_train_batch.transpose(batch_transpose), y_train_batch
-                    
-        except KeyboardInterrupt:
-            if self.initialized:
-                print('User interrupt, saving model')
-                #self.save_weights(out_weightf)
                 
     def train(self,train_gen,n_epochs,n_batches,initial_epoch=None,
-              validation_data=None,verbose=1,**kwargs):
+              validation_data=None,validation_ids=[],validation_preds=[],
+              **kwargs):
 
-        if len(self.callbacks)==0:
-            warn('Training model with no callbacks (did you call init_callbacks?)')
-
+        verbose = kwargs.get('verbose',1)
         initial_epoch = initial_epoch or self.start_epoch
-            
+        total_epochs = kwargs.pop('total_epochs',n_epochs-initial_epoch)
+        if len(self.callbacks)==0:
+            # specify total_epochs separately in case we're only training
+            # for a subset of the total number of epochs
+            self.init_callbacks(n_epochs=total_epochs,
+                                n_batches=n_batches,**kwargs)
+
+        if len(validation_ids)!=0 and self.val_cb:
+            # always update ids in case validation_data changed
+            self.val_cb.update_ids(validation_ids)
+
+        print(', '.join(['Training network for %d epochs'%n_epochs,
+                         'starting at epoch %d'%initial_epoch,
+                         '%d batches/epoch'%n_batches])) 
         self.base.fit_generator(train_gen,n_batches,
                                 epochs=n_epochs,
                                 initial_epoch=initial_epoch,
                                 validation_data=validation_data,
                                 callbacks=self.callbacks,
-                                workers=nb_workers,                                
-                                verbose=verbose)
+                                workers=n_workers,
+                                use_multiprocessing=use_multiprocessing,
+                                verbose=1)
+
+        if len(validation_preds)!=0 and self.val_cb:
+            # always update ids in case validation_data changed
+            validation_preds[:] = self.val_cb.collect_predictions()
 
         self.initialized = True
 
-def compile_model(input_shape,output_shape,**params):
+def compile_model(input_shape,n_classes,n_hidden=None,**kwargs):
     from keras.backend import image_data_format,set_image_data_format
     import importlib
-    
-    nb_hidden,nb_classes = output_shape
 
-    package   = params.pop('model_package',default_package)
-    flavor    = params.pop('model_flavor',default_flavor)
-    state_dir = params.pop('model_state_dir',None)
-    weightf   = params.pop('model_weightf',None)
-    flavorp   = params.pop('flavor_params',{})
+    package   = kwargs.pop('model_package',default_package)
+    flavor    = kwargs.pop('model_flavor',default_flavor)
+    state_dir = kwargs.pop('model_state_dir',None)
+    weightf   = kwargs.pop('model_weightf',None)
+    flavorp   = kwargs.pop('flavor_params',{})
+    num_gpus  = kwargs.pop('num_gpus',0)
 
     use_backend_format = kwargs.pop('use_backend_format',True)
     
@@ -497,12 +500,20 @@ def compile_model(input_shape,output_shape,**params):
         state_suf = pathjoin(package,flavor)
         
     if weightf and not pathexists(weightf):
+        # first check if weight file exists in state_dir
         if state_dir and pathexists(pathjoin(state_dir,state_suf,weightf)):
             print('Found weight file "%s" in state_dir "%s"'%(weightf,state_dir))
             weightf = pathjoin(state_dir,state_suf,weightf)
         else:
-            print('Weight file "%s" not found'%weightf)
-            weightf = None
+            # otherwise bail out due to the bad path
+            raise Exception('Weight file "%s" not found'%weightf)
+            
+
+    # need to specify hidden layer if we don't inherit from weight file
+    if not weightf:
+        n_hidden = n_hidden or default_n_hidden 
+
+    output_shape = [n_hidden,n_classes]
     
     if not state_dir:
         if weightf:
@@ -513,7 +524,6 @@ def compile_model(input_shape,output_shape,**params):
         else:
             state_dir = default_state_dir
     model_dir = pathjoin(state_dir,state_suf)
-    num_gpus  = params.pop('num_gpus',0)
 
     if package not in valid_packages:
         packages_str = str(valid_packages)
@@ -530,50 +540,69 @@ def compile_model(input_shape,output_shape,**params):
     package_lib = importlib.import_module(package_id)    
     flavor_lib  = importlib.import_module(flavor_id)
     model_backend = package_lib.backend().backend()
-
+    model_pid     = os.getpid()
+    
     model_transpose = [0,1,2]
     set_image_data_format('channels_last')
     if use_backend_format:
         if model_backend=='tensorflow':
             set_image_data_format('channels_last')
             if input_shape[0]==3:
-               input_shape = input_shape[1:]+[3]
-               model_transpose = [2,0,1]
-        elif model_backend=='theano':    
+                warn('Converted input_shape "%s" to "channels_last"'
+                     ' format for tensorflow backend')
+                input_shape = input_shape[1:]+[3]
+                model_transpose = [2,0,1]
+        elif model_backend=='theano':
             set_image_data_format('channels_first')
             if input_shape[-1]==3:
-               input_shape = [3]+input_shape[:-1]
-               model_transpose = [2,0,1]
+                warn('Converted input_shape "%s" to "channels_first"'
+                     ' format for theano backend')        
+                input_shape = [3]+input_shape[:-1]
+                model_transpose = [2,0,1]
 
-    start_epoch, start_monitor = 0, None
+    print('Initializing new %s_%s model with:'%(flavor,package),
+          '\ninput_shape=%s,'%str(input_shape),
+          'output_shape=%s,'%str(output_shape),
+          'model_transpose=%s,'%str(model_transpose),
+          'image_data_format=%s'%image_data_format())
+                
+    model_params = flavor_lib.model_init(input_shape,**flavorp)
+    lr_mult = model_params.pop('lr_mult',1.0)        
+
     if weightf:
         start_epoch, start_monitor = parse_model_meta(weightf)
         print('Restoring existing %s_%s model'%(flavor,package),
-              'from file: "%s"'%weightf,'with',
-              'start_epoch=%d,'%start_epoch,
-              'start_monitor=%.6f'%start_monitor)
-        model_base = package_lib.load_model(weightf)        
-    else:
-        print('Initializing new %s_%s model'%(flavor,package),
-              'with','input_shape=%s,'%str(input_shape),
-              'model_transpose=%s,'%str(model_transpose),
-              'image_data_format=%s'%image_data_format())
-        model_params = flavor_lib.model_init(input_shape,**flavorp)
-        lr_mult = model_params.pop('lr_mult',1.0)        
+              'from file: "%s" with:'%weightf,
+              '\ninput_shape=%s,'%str(input_shape),
+              'output_shape=%s,'%str(output_shape))
+        model_base = package_lib.load_model(weightf)
+    else:        
         model_base = model_params['model']
-
-        if lr_mult!=1.0:
-            lr_upkeys = []
-            for key,val in optparams.iteritems():
-                if key.startswith('lr_'):
-                    optparams[key] = optparams[key]*lr_mult
-                    lr_upkeys.append(key)
-
-            print('Updated optparams "%s" with lr_mult=%6.3f'%(str(lr_upkeys),
-                                                               lr_mult))
-        
+        start_epoch = 0
+        start_monitor = None
         model_base = package_lib.update_base_outputs(model_base,output_shape,
                                                      optparam=optparams)
+    model_input_shape = model_base.layers[0].input_shape
+    model_output_shape = model_base.layers[-1].output_shape
+    
+    assert(tuple(input_shape) == model_input_shape[-len(input_shape):])
+    assert(output_shape[-1] == model_output_shape[-1])    
+    model_params['model'] = model_base
+    print('Initialized model with:',
+          '\nmodel_input_shape=%s,'%str(model_input_shape),
+          'model_output_shape=%s,'%str(model_output_shape),
+          'start_epoch=%d,'%start_epoch,
+          'start_monitor=',start_monitor)
+    
+    if lr_mult!=1.0:
+        lr_upkeys = []
+        for key,val in optparams.iteritems():
+            if key.startswith('lr_'):
+                optparams[key] = optparams[key]*lr_mult
+                lr_upkeys.append(key)
+                
+        print('Updated optparams "%s" with lr_mult=%6.3f'%(str(lr_upkeys),
+                                                           lr_mult))
 
     if model_backend == 'tensorflow':
         from keras.utils.training_utils import multi_gpu_model
@@ -592,26 +621,34 @@ def compile_model(input_shape,output_shape,**params):
             model_base = multi_gpu_model(model_base, gpus=num_gpus)
 
     model_params = package_lib.model_init(model_base,flavor,state_dir,
-                                          optparams,**params)
+                                          optparams,**kwargs)
     model_params.setdefault('start_epoch',start_epoch)
     model_params.setdefault('start_monitor',start_monitor)
     model_params.setdefault('transpose',model_transpose)
     model_params.setdefault('input_shape',input_shape)
+    model_params.setdefault('pid',model_pid)
+    model_params.setdefault('val_monitor','val_loss')
     model = Model(**model_params)
     
-    model_png = pathjoin(model_dir,'model.png')
+    model_png = pathjoin(model_dir,'model_pid%d.png'%model_pid)
     if pathexists(model_png):
         os.remove(model_png) # delete the old png to avoid irritating warnings
     try:
-        from keras.utils.vis_utils import plot_model        
+        from keras.utils import plot_model        
         plot_model(model.base, to_file=model_png, show_layer_names=True,
                    show_shapes=True)
         print('Saved model diagram to "%s"'%model_png)
     except Exception as e:
-        warn('Unable to generate model diagram "%s" due to exception: %s'%(model_png,
-                                                                           str(e)))
-    print('Compiling',flavor,'model')
+        from keras.utils import print_summary
+        warn('Unable to generate model plot "%s" due to exception: %s'%(model_png,
+                                                                        str(e)))
+        print('Saving text-based model instead')
+        model_txt = pathjoin(model_dir,'model_layers_pid%d.txt'%model_pid)
+        with open(model_txt,'w') as fid:
+            print2fid = lambda *args: print(''.join(args),file=fid)
+            print_summary(model.base,print_fn=print2fid)
 
+    print('Compiling',flavor,'model')
     model.compile()
     
     model.initialized = True        
@@ -619,3 +656,6 @@ def compile_model(input_shape,output_shape,**params):
     
     return model
 
+if __name__ == '__main__':
+    print('hello')
+   

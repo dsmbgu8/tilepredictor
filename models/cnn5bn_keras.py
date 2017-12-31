@@ -27,30 +27,30 @@ def model_init(input_shape,**kwargs):
     model.add(BatchNormalization())    
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2,2)))
-    model.add(SpatialDropout2D(0.2))
+    model.add(SpatialDropout2D(0.1))
     
     model.add(Convolution2D(48,(2,2)))
     model.add(BatchNormalization())    
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2,2)))
-    model.add(SpatialDropout2D(0.3))
+    model.add(SpatialDropout2D(0.2))
 
     model.add(Convolution2D(64,(2,2)))
     model.add(BatchNormalization())    
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2,2)))    
-    model.add(SpatialDropout2D(0.4))
+    model.add(SpatialDropout2D(0.2))
 
     model.add(Convolution2D(80,(2,2)))
     model.add(BatchNormalization())    
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2,2)))    
-    model.add(SpatialDropout2D(0.5))    
+    model.add(SpatialDropout2D(0.3))    
 
     model.add(Flatten())
     model.add(Dense(2048))
     model.add(Activation('relu'))
-    model.add(Dropout(0.5))
+    model.add(Dropout(0.4))
 
     return dict(model=model,lr_mult=1.0)
 
