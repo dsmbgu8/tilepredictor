@@ -1,5 +1,5 @@
 from warnings import warn
-_model_id='CNN3BN'
+_model_id='CNN3BNV2'
 def model_init(input_shape,**kwargs):
     from keras import backend as _backend
     from keras.models import Sequential
@@ -17,13 +17,13 @@ def model_init(input_shape,**kwargs):
     assert(len(input_shape)==3)
       
     model = Sequential()
-    model.add(Convolution2D(16,(3,3),padding='same',input_shape=input_shape))
+    model.add(Convolution2D(64,(3,3),padding='same',input_shape=input_shape))
     model.add(BatchNormalization())    
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2,2)))
     model.add(SpatialDropout2D(0.1))
     
-    model.add(Convolution2D(32,(2,2)))
+    model.add(Convolution2D(64,(2,2)))
     model.add(BatchNormalization())        
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2,2)))

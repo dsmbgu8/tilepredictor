@@ -4,7 +4,7 @@ from __future__ import division, print_function, absolute_import, unicode_litera
 from os.path import exists as pathexists, expanduser
 
 import numpy as np
-from skimage.io import ImageCollection
+from .collections import ImageCollection
 
 from tilepredictor_util import *
 from pylib import *
@@ -106,12 +106,14 @@ def load_image_data(train_file,test_file,**kwargs):
             load_func = _imread
 
     balance_train = kwargs.pop('balance_train',False)
-    collect_test = kwargs.pop('collect_test',True)
     test_percent = kwargs.pop('test_percent',0.2)
     exclude_pattern = kwargs.pop('exclude_pattern',None)
     mean_image = kwargs.pop('mean_image',None)
     class_mode = kwargs.pop('class_mode','categorical')
     conserve_mem = kwargs.pop('conserve_memory',True)
+    collect_test = kwargs.pop('collect_test',True)
+    save_test = kwargs.pop('save_test',False)
+        
     if train_file==test_file:
         warn('train_file==test_file, sampling test data from train_file')
         test_file = None
@@ -177,8 +179,16 @@ def load_image_data(train_file,test_file,**kwargs):
         test_lab = to_binary(y_test)
         if collect_test:
             print('Collecting %d test samples'%len(y_test))
-            X_test = X_test.concatenate()
-            #X_test,y_test = collect_batch(X_test,y_test,verbose=1)
+            #X_test = X_test.concatenate()
+            test_outf = None
+            if save_test:                
+                if not test_file:
+                    test_basef,_ = splitext(test_file)
+                    test_basef = test_basef + '_test%0.2f'%test_percent
+                else:
+                    test_basef,_ = splitext(test_file)
+                test_outf = test_basef+'.npy'
+            X_test,y_test = collect_batch(X_test,y_test,outf=test_outf,verbose=1)
 
     print("Training samples: {}, input shape: {}".format(len(X_train),X_train[0].shape))
     print('Training classes: %s'%str(class_stats(train_lab)))

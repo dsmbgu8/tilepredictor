@@ -1,11 +1,11 @@
 import numpy as np
 
 def load_model(modelf,**kwargs):
-    from keras.models import Sequential, load_model as _load_model
+    from keras.models import _clone_sequential_model, Sequential, \
+        load_model as _load_model
     flatten = kwargs.pop('flatten',False)
     model = _load_model(modelf,**kwargs)
     if flatten and model.layers[0].name.startswith('sequential_'):
-        from keras.models import _clone_sequential_model
         _model = _clone_sequential_model(model.layers[0])
         for layer in model.layers[1:]:
             _model.add(layer)
@@ -16,12 +16,12 @@ def backend():
     from keras import backend as _backend
     return _backend
 
-def update_base_outputs(model_base,output_shape,optparam,output_layer='fc'):
-    from keras.models import Sequential
-    from keras.layers import Dense
+def update_base_outputs(model_base,output_shape,optparam,hidden_type='fc'):
+    from keras.models import Model, Sequential
+    from keras.layers import Dense, Input
     from keras.regularizers import l2 as activity_l2
     from keras.constraints import max_norm as max_norm_constraint
-
+    
     n_hidden,n_classes = output_shape
     print('output_shape: "%s"'%str((output_shape)))
     print('Adding %d x %d relu hidden + softmax output layer'%(n_hidden,
@@ -33,16 +33,35 @@ def update_base_outputs(model_base,output_shape,optparam,output_layer='fc'):
     max_norm=optparam.get('max_norm',np.inf)
     if max_norm!=np.inf:
         obj_param['kernel_constraint']=max_norm_constraint(max_norm)
-        
-    model = Sequential(layers=model_base.layers)
 
-    if output_layer=='fc':
-        model.add(Dense(n_hidden, activation='relu'))
+    model_input = model_base.layers[0].input
+    model_input_shape = model_base.layers[0].input_shape
+    print('model_input_shape=%s'%str(model_input_shape))
+    
+    if hidden_type=='fc':
+        hidden_layer = Dense(n_hidden, activation='relu')
     else:
-        print('Unknown output_layer "%s", using "fc"'%output_layer)
-        model.add(Dense(n_hidden, activation='relu'))
-        
-    model.add(Dense(n_classes, activation='softmax', **obj_param))
+        print('Unknown hidden_type "%s", using "fc"'%hidden_type)
+        hidden_layer = Dense(n_hidden, activation='relu')
+
+    output_layer = Dense(n_classes, activation='softmax', **obj_param)
+
+    mclass = model_base.__class__.__name__
+    if mclass == 'Sequential':
+        print("Using Sequential model")
+        model = model_base
+        model.add(hidden_layer)
+        model.add(output_layer) 
+    else:
+        print("Using functional API")
+        #model = Model(inputs=model_base.inputs, outputs=model_base.outputs)
+        #model = hidden_layer(model)
+        #model = output_layer(model)
+
+        model = Sequential()
+        model.add(model_base)        
+        model.add(hidden_layer)
+        model.add(output_layer)        
 
     model.n_base_layers = len(model_base.layers)
     model.n_top_layers = len(model.layers)-model.n_base_layers
@@ -58,7 +77,7 @@ def model_transform(X,model,layer=0):
 
 def model_init(model_base, model_flavor, state_dir, optparam, **params):
     #from keras.optimizers import Adam as Optimizer
-    #optparams   = dict(lr=optparam['init_lr'],
+    #optparams   = dict(lr=optparam['lr_min'],
     #                   beta_1=optparam['beta_1'],
     #                   beta_2=optparam['beta_2'],
     #                   decay=optparam['weight_decay'],
@@ -72,7 +91,7 @@ def model_init(model_base, model_flavor, state_dir, optparam, **params):
 
     print('Initialzing optimizer')
     lr_mult = params.pop('lr_mult',1.0)
-    optparams   = dict(lr=optparam['lr_base'],
+    optparams   = dict(lr=optparam['lr_min'],
                        beta_1=optparam['beta_1'],
                        beta_2=optparam['beta_2'],
                        schedule_decay=optparam['weight_decay'],

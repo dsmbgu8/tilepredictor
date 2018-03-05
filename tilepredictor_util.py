@@ -7,6 +7,14 @@ from warnings import warn
 
 import numpy as np
 
+from os.path import abspath, expanduser, splitext
+from os.path import join as pathjoin, split as pathsplit, exists as pathexists 
+
+tilepredictor_home = pathsplit(__file__)[0]
+sys.path.append(abspath(tilepredictor_home))
+sys.path.append(abspath(os.getcwd()))
+
+
 random_state = 42
 image_ext = '.png'
 load_pattern = "*"+image_ext
@@ -146,6 +154,38 @@ def collect_image_uls(img_test,tile_dim,tile_stride):
     
     return uls
 
+def extract_tile(img,ul,tdim,transpose=None,cval=0,verbose=False):
+    '''
+    extract a tile of dims (tdim,tdim,img.shape[2]) offset from upper-left 
+    coordinate ul in img, zero pads when tile overlaps image extent 
+    '''
+    ndim = img.ndim
+    if ndim==3:
+        nr,nc,nb = img.shape
+    elif ndim==2:
+        nr,nc = img.shape
+        nb = 1
+    else:
+        raise Exception('invalid number of image dims %d'%ndim)
+    
+    lr = (ul[0]+tdim,ul[1]+tdim)
+    padt,padb = abs(max(0,-ul[0])), tdim-max(0,lr[0]-nr)
+    padl,padr = abs(max(0,-ul[1])), tdim-max(0,lr[1]-nc)
+    
+    ibeg,iend = max(0,ul[0]),min(nr,lr[0])
+    jbeg,jend = max(0,ul[1]),min(nc,lr[1])
+
+    if verbose:
+        print(ul,nr,nc)
+        print(padt,padb,padl,padr)
+        print(ibeg,iend,jbeg,jend)
+
+    imgtile = cval*np.ones([tdim,tdim,nb],dtype=img.dtype)
+    imgtile[padt:padb,padl:padr] = np.atleast_3d(img[ibeg:iend,jbeg:jend])
+    if transpose is not None:
+        imgtile = imgtile.transpose(transpose)
+    return imgtile
+
 def generate_tiles(img_test,tile_uls,tile_dim):
     for tile_ul in tile_uls:
         tile_img = extract_tile(img_test,tile_ul,tile_dim,verbose=False)
@@ -245,6 +285,10 @@ def preprocess_img_u8(img):
     img *= 2.
     return img
 
+def preprocess_img_float(img):
+    assert(img.min()>=-1.0 and img.max()<=1.0)
+    return np.float32(img)
+
 def class_stats(labs,verbose=0):
     _labs = labs.squeeze()
     assert(_labs.ndim==1)
@@ -255,13 +299,14 @@ def class_stats(labs,verbose=0):
                                                                npos,nneg))
     return npos,nneg
 
-def band_stats(X,n_bands=3,verbose=1):
+def band_stats(X,verbose=1):
     assert(X.ndim==4)
     band_index = -1 # 'channels_last'
-    if X.shape[band_index]!=n_bands:
+    if X.shape[band_index] not in (1,3,4):
         band_index = 1 # 'channels_first'
-        assert(X.shape[band_index]==n_bands)
+        assert(X.shape[band_index] in (1,3,4))
 
+    n_bands = X.shape[band_index]
     bmin = np.zeros(n_bands)
     bmax = np.zeros(n_bands)
     bmean = np.zeros(n_bands)
@@ -450,11 +495,16 @@ def resize_tile(tile,tile_shape=[],resize='resize',dtype=np.uint8,verbose=0):
     if verbose:
         imin,imax = extrema(tile.ravel())
 
-    if itype==float and (tile.ndim == 2 or tile.shape[2]==1):
+    ifloat = itype in (np.float32,np.float64)
+    dfloat = dtype in (np.float32,np.float64)
+        
+    if ifloat and dtype==np.uint8 and (tile.ndim==2 or tile.shape[2]==1):
+        # stretch 1-band float32 into 24bit rgb
         nr,nc = tile.shape[:2]
         tile = np.uint32(((2**24)-1)*tile.squeeze()).view(dtype=np.uint8)
         tile = tile.reshape([nr,nc,4])[...,:-1]     
-    elif tile.shape[2] == 4:
+    elif itype==np.uint8 and tile.shape[2]==4:
+        # drop alpha from rgba
         tile = tile[:,:,:-1]
 
     if resize=='extract':
@@ -464,20 +514,28 @@ def resize_tile(tile,tile_shape=[],resize='resize',dtype=np.uint8,verbose=0):
         c = 0 if coff<0 else randint(coff)
         if r != 0 or c != 0:
             tile = extract_tile(tile,(r,c),tile_shape[0])
-            
+
     elif resize=='crop':
         tile = imcrop(tile,tile_shape)
-        
+
     elif resize=='zoom_crop':
         # scale image by ratio of new vs. current size, crop into tile_shape
-        rs_shape = [int(tile.shape[i]*(tile_shape[i]/tile.shape[i]))
+        assert(all(tile.shape[i]<=tile_shape[i] for i in range(2)))
+        rs_shape = [int(tile.shape[i]*(tile_shape[i]/tile.shape[i]))+1
                     for i in range(2)]
         tile = imresize(tile,rs_shape)
         tile = imcrop(tile,tile_shape)
     else:
         tile = imresize(tile,tile_shape)
+
+    if dfloat:
+        assert((tile.min()>=-1.0) and (tile.max()<=1.0))
         
-    scalef = 255 if itype==float else 1
+    if ifloat and dtype==np.uint8:
+        scalef = 255.0
+    else:
+        scalef = 1.0
+           
     tile = dtype(scalef*tile)
     if verbose:
         omin,omax = extrema(tile.ravel())
@@ -782,7 +840,8 @@ def threadsafe_generator(f):
     return g
 
 #@timeit
-def collect_batch(imgs,labs,batch_idx=[],imgs_out=[],labs_out=[],verbose=0):
+def collect_batch(imgs,labs,batch_idx=[],imgs_out=[],labs_out=[],
+                  outf=None,verbose=0):
     # collect img_out,lab_out from collection imgs
     imgshape = imgs[0].shape
     nbatch = len(batch_idx)
@@ -800,6 +859,20 @@ def collect_batch(imgs,labs,batch_idx=[],imgs_out=[],labs_out=[],verbose=0):
     for i,idx in batch_iter:
         imgs_out[i] = imgs[idx]
         labs_out[i] = labs[idx]
+
+    if outf:
+        outbase,outext = splitext(outf)
+        if len(outext)==0:
+            outext='.npy'
+        outdatf = outbase+'_X'+outext
+        if not pathexists(outdatf):
+            np.save(outdatf, imgs_out, allow_pickle=False, fix_imports=True)
+            print('saved',outdatf)
+        outlabf = outbase+'_y'+outext
+        if not pathexists(outlabf):
+            np.save(outlabf, labs_out, allow_pickle=False, fix_imports=True)
+            print('saved',outlabf)        
+        
     return imgs_out,labs_out
 
 #@timeit

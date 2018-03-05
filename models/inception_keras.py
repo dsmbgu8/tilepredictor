@@ -1,9 +1,10 @@
 from warnings import warn
 _model_id = 'InceptionV3'
-MAX_BLOCK = 11 # inception max block=11
+MAX_BLOCK = 12 # inception max block=11
 def model_init(input_shape,**kwargs):
     from keras.applications import InceptionV3    
-    assert(len(input_shape)==3)
+
+    assert(len(input_shape)==3 and input_shape[2]==3)
 
     fix_base = kwargs.pop('fix_base',True)
     if not fix_base:

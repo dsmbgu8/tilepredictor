@@ -16,11 +16,6 @@ verbose=True
 train_size=0.75
 random_state=42
 
-def loadlabs(labf,**kwargs):
-    X_images,y,_,_ = load_data(labf,**kwargs)
-    X = np.array(X_images.files)
-    return X,y
-
 def split_single(X,y,**kwargs):    
     kwargs.setdefault('stratify',y)
     kwargs.setdefault('train_size',train_size)
@@ -115,8 +110,9 @@ if __name__ == '__main__':
         mode='single'
 
     print('loading',labf)
-    X,y = loadlabs(labf)
-    
+    (X,y) = load_file(labf,load_func=lambda f: f,class_mode='binary')
+    X = np.array(X.files)
+
     if mode=='single':
         X_train,y_train,X_test,y_test = split_single(X,y)
     elif mode=='multiple':

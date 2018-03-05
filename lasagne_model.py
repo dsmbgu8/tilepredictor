@@ -1,4 +1,4 @@
-def update_base_outputs(base_model,nb_classes,nb_hidden,obj_lambda2,max_norm):
+def update_base_outputs(base_model,n_classes,n_hidden,obj_lambda2,max_norm):
     pass
 
 def load_model(*args,**kwargs):
@@ -21,13 +21,13 @@ def lasagne_model(model_base, model_flavor, state_dir, **params):
     overwrite   = params.get('overwrite',True)
 
     sym_x = tensor4() # [nbatch,imgchan,imgrows,imgcols] dims
-    sym_y = imatrix() # one-hot vector of [nb_class x 1] dims
+    sym_y = imatrix() # one-hot vector of [n_class x 1] dims
 
     l_A_net      = model_base['A_net']
     l_transform  = model_base['transform']
     l_out        = model_base['net_out']        
     output_train = ll_output(l_out, sym_x, deterministic=False)
-    output_shape = (-1, l_out.shape[1]) # nb_classes = l_out.shape[1]
+    output_shape = (-1, l_out.shape[1]) # n_classes = l_out.shape[1]
     output_flat  = treshape(output_train, output_shape)
     output_loss  = nnet.categorical_crossentropy
     output_cost  = tmean(output_loss(output_flat+tol,sym_y.flatten()))

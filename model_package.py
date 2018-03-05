@@ -11,14 +11,13 @@ pyext=expanduser('~/Research/src/python/external')
 #sys.path.insert(0,pathjoin(pyext,'keras207/build/lib'))
 #sys.path.insert(0,pathjoin(pyext,'keras208/build/lib'))
 #sys.path.insert(0,pathjoin(pyext,'keras-multiprocess-image-data-generator'))
-sys.path.insert(0,pathjoin(pyext,'CLR'))
+sys.path.insert(0,pathjoin(pyext,'CLR')) # cyclic learning rate callback
+sys.path.insert(0,pathjoin(pyext,'imgaug')) # image augmentation
 
 from tilepredictor_util import *
 
-
-tilepredictor_path = abspath(pathsplit(__file__)[0])
 valid_packages = ['keras']
-model_path = pathjoin(tilepredictor_path,'models')
+model_path = pathjoin(tilepredictor_home,'models')
 valid_flavors = []
 for pkg in valid_packages:
     for path in glob(pathjoin(model_path,'*'+pkg+'*.py')):
@@ -29,7 +28,9 @@ valid_flavors = list(set(valid_flavors))
 
 default_package   = valid_packages[0] # 'keras'
 default_flavor    = valid_flavors[0] # 'cnn3'
-default_state_dir = './state/'
+default_state_dir = pathjoin(os.getcwd(),'state')
+
+datagen_paramf    = pathjoin(tilepredictor_home,'datagen_params.json')
 
 # softmax probs are:
 # [0.0,0.5] class 0
@@ -50,81 +51,63 @@ n_batches = n_epochs//batch_size
 
 
 use_multiprocessing = False
-n_workers = 5
+n_workers = 4
 
 random_state = 42
-tol = 1e-8
+tol = 0.000001
 optparams = dict(
-    weight_decay = 1e-6,
+    weight_decay = 0.000001,
     reduce_lr = 0.1,
     beta_1 = 0.9,
     beta_2 = 0.999,
-    lr_base = 1e-5,
-    lr_max = 1e-2,
+    lr_min = 0.0001,
+    lr_max = 0.01,
     obj_lambda2 = 0.0025,
     max_norm = np.inf, # 5.0
     tol = tol,
-    stop_delta = 1e-3
+    stop_delta = 0.001
 )
 
-train_rot_range=180.0
-train_shear_range=10.0 # shear degrees
-train_shift_range=0.1 # percentage of rows/cols to shift
-train_zoom_range=0.1 # range = (1-zoom,1+zoom) percent
 
-train_datagen_params = dict(featurewise_center=False,
-                            samplewise_center=False,
-                            featurewise_std_normalization=False,
-                            samplewise_std_normalization=False,
-                            zca_whitening=False,
-                            zca_epsilon=tol,
-                            rotation_range=train_rot_range,
-                            width_shift_range=train_shift_range,
-                            height_shift_range=train_shift_range,
-                            shear_range=np.deg2rad(train_shear_range),
-                            zoom_range=train_zoom_range,
-                            fill_mode='wrap',
-                            horizontal_flip=True,
-                            vertical_flip=True,
-                            rescale=None,
-                            preprocessing_function=None)
-
-def load_datagen_params(paramf='train_datagen_params.json',verbose=0):
+def load_datagen_params(paramf,verbose=0):
     if verbose:
-        print('Loading datagen parameters from file "%s"'%paramf)
+        print('Loading datagen parameters from "%s"'%paramf)
     return load_json(paramf)
 
-def save_datagen_params(paramf='train_datagen_params.json',verbose=0,
-                        datagen_params=train_datagen_params,**kwargs):
+def save_datagen_params(paramf,params,verbose=0,**kwargs):
     if verbose:
-        print('Saving datagen parameters to file "%s"'%paramf)    
-    return save_json(paramf,datagen_params,**kwargs)
+        print('Saving datagen parameters to "%s"'%paramf)    
+    return save_json(paramf,params,**kwargs)
         
 @threadsafe_generator
-def datagen_arrays(X,y,batch_size,datagen_params=train_datagen_params,
-                   shuffle=True,fill_partial=False,random_state=random_state,
+def datagen_arrays(X,y,batch_size,datagen_params,shuffle=True,
+                   fill_partial=False,random_state=random_state,
                    preprocessing_function=None,verbose=0):
-                   
-    from keras.preprocessing.image import ImageDataGenerator
-    
-    # only call datagen.fit() if these keys are present
-    fit_kw = ['featurewise_center',
-              'featurewise_std_normalization',
-              'zca_whitening']
-        
-    flowkw = dict(batch_size=batch_size,shuffle=shuffle,seed=random_state,
-                  save_to_dir=None,save_prefix='',save_format='png')
-    datagen_params.setdefault('preprocessing_function',preprocessing_function)
-    datagen = ImageDataGenerator(**datagen_params)
-    # only fit datagen if one of the fit keys is true
-    if any([datagen_params.get(key,False) for key in fit_kw]):
-        print('Fitting ImageDataGenerator for %d samples (this could take some time)'%len(X))
-        fittime = gettime()
-        datagen.fit(X,seed=random_state)
-        fittime = gettime()-fittime
-        print('Fit complete, processing time: %0.3f seconds'%fittime)
-    transform = datagen.random_transform
-    datagen_iter = datagen.flow(X,y,**flowkw)
+
+    datagen_model = datagen_params.pop('model','ImageDataGenerator')
+    if datagen_model == 'ImageDataGenerator':
+        from keras.preprocessing.image import ImageDataGenerator
+        # only call datagen.fit() if these keys are present
+        fit_kw = ['featurewise_center',
+                  'featurewise_std_normalization',
+                  'zca_whitening']
+        flowkw = dict(batch_size=batch_size,shuffle=shuffle,seed=random_state,
+                      save_to_dir=None,save_prefix='',save_format='png')
+        datagen_params.setdefault('preprocessing_function',preprocessing_function)
+        datagen = ImageDataGenerator(**datagen_params)
+        # only fit datagen if one of the fit keys is true
+        if any([datagen_params.get(key,False) for key in fit_kw]):
+            print('Fitting ImageDataGenerator for %d samples (this could take some time)'%len(X))
+            fittime = gettime()
+            datagen.fit(X,seed=random_state)
+            fittime = gettime()-fittime
+            print('Fit complete, processing time: %0.3f seconds'%fittime)
+        datagen_transform = datagen.random_transform
+        datagen_iter = datagen.flow(X,y,**flowkw)
+    elif datagen_model == 'imgaug':
+        raise Exception('imgaug datagen not implemented yet')
+    else:
+        raise Exception('unknown datagen_model "%s"'%datagen_model)
     for bi, (X_batch, y_batch) in enumerate(datagen_iter):
         if is_collection(X_batch):
             warn('ImageDataGenerator generates ImageCollections, concatenating')
@@ -132,7 +115,7 @@ def datagen_arrays(X,y,batch_size,datagen_params=train_datagen_params,
 
         if fill_partial and X_batch.ndim==4 and X_batch.shape[0] < batch_size:
             X_fill,y_fill = fill_batch(X_batch,y_batch,batch_size,balance=True)
-            X_batch = np.r_[X_batch,map(transform,X_fill)]
+            X_batch = np.r_[X_batch,map(datagen_transform,X_fill)]
             y_batch = np.r_[y_batch,y_fill]
         if verbose>1 and bi==0:
             print('\nBatch %d: '%bi,
@@ -144,8 +127,7 @@ def datagen_arrays(X,y,batch_size,datagen_params=train_datagen_params,
         yield X_batch, y_batch
 
 @threadsafe_generator
-def datagen_directory(path,target_size,batch_size,
-                      datagen_params=train_datagen_params,
+def datagen_directory(path,target_size,batch_size,datagen_params,
                       classes=None,class_mode='categorical',
                       shuffle=True,fill_partial=False,verbose=0,
                       preprocessing_function=None, random_state=random_state):
@@ -252,10 +234,12 @@ class Model(object):
         self.state_dir     = kwargs['state_dir']
         self.load_base     = kwargs['load_base']
 
+        self.transpose     = kwargs['transpose']
+        self.rtranspose    = kwargs['rtranspose']
+        
         self.pid           = kwargs['pid']
         self.start_epoch   = kwargs['start_epoch']
         self.start_monitor = kwargs['start_monitor']
-        self.transpose     = kwargs['transpose']
         self.val_monitor   = kwargs['val_monitor']
 
         self.callbacks     = []
@@ -270,14 +254,24 @@ class Model(object):
             makedirs(self.model_dir,verbose=True)
 
     def preprocess(self,img,transpose=True,verbose=0):
-        n_bands=img.shape[-1]
+        shape = img.shape
+        n_bands = shape[-1]
         dtype = img.dtype
-        if dtype != np.uint8:
-            raise Exception('No preprocessing function defined for dtype "%s"!'%str(dtype))
-        shape = img.shape        
-        if img.ndim not in (3,4) or n_bands != 3:
-            raise Exception('No preprocessing function defined for image shape "%s"!'%str(shape))
-        imgpre = preprocess_img_u8(img)
+        
+        if img.ndim not in (3,4) or n_bands not in (1,3):
+            warn('No preprocessing function defined for image shape "%s"!'%str(shape))
+
+        if dtype == np.uint8:
+            #print('Preprocessing function: preprocess_img_u8')
+            _preprocess = preprocess_img_u8
+        elif dtype in (np.float32,np.float64):
+            #print('Preprocessing function: preprocess_img_float')
+            _preprocess = preprocess_img_float
+        else:
+            raise Exception('No preprocessing function defined for data type "%s"!'%str(dtype))
+
+        imgpre = _preprocess(img)
+        
         if verbose:
             if img.ndim == 3:
                 imin,imax,_ = band_stats(img[np.newaxis])
@@ -290,7 +284,8 @@ class Model(object):
             if imgpre.ndim==3:
                 imgpre = imgpre.transpose(self.transpose) 
             elif imgpre.ndim==4:
-                imgpre = imgpre.transpose([0]+[i+1 for i in self.transpose]) 
+                imgpre = imgpre.transpose([0]+[i+1 for i in self.transpose])
+                
         if verbose:
             print('Before preprocess: '
                   'type=%s, shape=%s, '%(str(dtype),str(shape)),
@@ -387,7 +382,7 @@ class Model(object):
         #                        save_best_only=True, save_weights_only=False,                                
         #                        verbose=False)
         step_lr = step_lr or int(n_batches*4)
-        self.lr_cb = CyclicLR(base_lr=optparams['lr_base'],
+        self.lr_cb = CyclicLR(base_lr=optparams['lr_min'],
                               max_lr=optparams['lr_max'],
                               step_size=step_lr,
                               loop=clr_loop)
@@ -396,7 +391,7 @@ class Model(object):
         #     self.lr_cb = ReduceLROnPlateau(monitor=val_monitor,
         #                                    mode=val_mode,
         #                                    patience=step_lr,
-        #                                    min_lr=optparams['lr_base'],
+        #                                    min_lr=optparams['lr_min'],
         #                                    factor=optparams['reduce_lr'],
         #                                    epsilon=optparams['tol'],
         #                                    verbose=verbose)
@@ -480,7 +475,21 @@ class Model(object):
 
         self.initialized = True
 
-def compile_model(input_shape,n_classes,n_hidden=None,**kwargs):
+def model_summary(model):
+    layers = model.layers
+    l = layers[0]
+    lclass = l.__class__.__name__
+    print('Model: %d layers'%len(layers))
+    print('Layer[0] (%s) input_shape: %s'%(lclass,str(l.input_shape)))
+    prev_shape = l.output_shape
+    for i,l in enumerate(layers):
+        if l.output_shape == prev_shape:
+            continue
+        lclass = l.__class__.__name__
+        print('Layer[%d] (%s) output_shape: %s'%(i,lclass,str(l.output_shape)))
+
+        
+def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
     from keras.backend import image_data_format,set_image_data_format
     import importlib
 
@@ -491,7 +500,6 @@ def compile_model(input_shape,n_classes,n_hidden=None,**kwargs):
     flavorp   = kwargs.pop('flavor_params',{})
     num_gpus  = kwargs.pop('num_gpus',0)
 
-    use_backend_format = kwargs.pop('use_backend_format',True)
     
     # new paths: e.g., state_dir/cnn3_keras
     state_suf = '_'.join([flavor,package])
@@ -542,23 +550,30 @@ def compile_model(input_shape,n_classes,n_hidden=None,**kwargs):
     model_backend = package_lib.backend().backend()
     model_pid     = os.getpid()
     
+    backend_image_format = kwargs.pop('backend_image_format',True)
+
+    # default image__format = tensorflow = channels_last 
     model_transpose = [0,1,2]
-    set_image_data_format('channels_last')
-    if use_backend_format:
+    model_rtranspose = [0,1,2]
+    image_format = 'channels_last'
+    if backend_image_format:
         if model_backend=='tensorflow':
-            set_image_data_format('channels_last')
-            if input_shape[0]==3:
+            image_format = 'channels_last'
+            if input_shape[0]==n_bands:
                 warn('Converted input_shape "%s" to "channels_last"'
                      ' format for tensorflow backend')
                 input_shape = input_shape[1:]+[3]
                 model_transpose = [2,0,1]
+                model_rtranspose = [1,2,0]
         elif model_backend=='theano':
-            set_image_data_format('channels_first')
-            if input_shape[-1]==3:
+            image_format = 'channels_first'
+            if input_shape[-1]==n_bands:
                 warn('Converted input_shape "%s" to "channels_first"'
                      ' format for theano backend')        
                 input_shape = [3]+input_shape[:-1]
                 model_transpose = [2,0,1]
+                model_rtranspose = [1,2,0]
+    set_image_data_format(image_format)
 
     print('Initializing new %s_%s model with:'%(flavor,package),
           '\ninput_shape=%s,'%str(input_shape),
@@ -625,6 +640,7 @@ def compile_model(input_shape,n_classes,n_hidden=None,**kwargs):
     model_params.setdefault('start_epoch',start_epoch)
     model_params.setdefault('start_monitor',start_monitor)
     model_params.setdefault('transpose',model_transpose)
+    model_params.setdefault('rtranspose',model_rtranspose)
     model_params.setdefault('input_shape',input_shape)
     model_params.setdefault('pid',model_pid)
     model_params.setdefault('val_monitor','val_loss')
@@ -648,6 +664,8 @@ def compile_model(input_shape,n_classes,n_hidden=None,**kwargs):
             print2fid = lambda *args: print(''.join(args),file=fid)
             print_summary(model.base,print_fn=print2fid)
 
+    model_summary(model.base)
+            
     print('Compiling',flavor,'model')
     model.compile()
     

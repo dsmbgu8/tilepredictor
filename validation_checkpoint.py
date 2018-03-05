@@ -10,8 +10,9 @@ from keras.callbacks import Callback
 
 class ValidationCheckpoint(Callback):
     def __init__(self,val_monitor='val_loss',model_dir=None, mode='auto',
-                 period=1,warmup=5,save_best_model=True,save_best_preds=True,
-                 initial_monitor=None,initial_epoch=0,pid=None,verbose=0):
+                 period=1,warmup=5,max_vanish=5,initial_epoch=0,
+                 save_best_model=True,save_best_preds=True,
+                 initial_monitor=None,pid=None,verbose=0):
         super(ValidationCheckpoint, self).__init__()
         
         self.metrics      = {}
@@ -41,6 +42,9 @@ class ValidationCheckpoint(Callback):
         self.epoch_best   = initial_epoch if initial_monitor else 0
         self.period       = period
         self.warmup       = warmup
+        self.max_vanish   = max_vanish
+        self.epoch_vanish = 0
+        
 
         self.out_suffix   = 'iter{epoch:d}_%s{%s:.6f}'%(self.val_monitor,
                                                         self.val_monitor)
@@ -205,8 +209,9 @@ class ValidationCheckpoint(Callback):
                 self.debug_epoch += 1
                 if self.debug_epoch > 2:
                     self.debug_epoch = 0
-                        
-            mstr = ['loss=%9.6f'%logs['val_loss']]
+
+            val_loss = logs['val_loss']
+            mstr = ['loss=%9.6f'%val_loss]
             pred_metrics = compute_metrics(test_labs,self.pred_labs)
             for m in metrics_sort:
                 val = pred_metrics[m]
@@ -222,6 +227,13 @@ class ValidationCheckpoint(Callback):
                 # current score doesn't beat the best, report status
                 statemsg += '\nCurrent best %s=%.6f @ epoch %d'%(self.val_monitor,self.val_best,
                                                                  self.epoch_best)
+                if self.epoch_best != 0 and val_loss==0.0:
+                    if self.epoch_vanish == self.max_vanish:
+                        statemsg += 'Epoch %d: nonzero gradient vanished for max_vanish (=%d) consecutive epochs, terminating training'%(epoch,self.max_vanish)
+                        self.model.stop_training = True
+                    self.epoch_vanish = self.epoch_vanish + 1                    
+                else:
+                    self.epoch_vanish = 0
             else:
                 # new best score, update best and report status
                 statemsg += '\nNew best %s=%.6f'%(self.val_monitor,self.val_best)

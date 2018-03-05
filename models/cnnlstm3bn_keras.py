@@ -1,5 +1,5 @@
 from warnings import warn
-_model_id='CNN3BN'
+_model_id='CNNLSTM3BN'
 def model_init(input_shape,**kwargs):
     from keras.models import Sequential
     from keras.layers import TimeDistributed, LSTM
@@ -16,14 +16,16 @@ def model_init(input_shape,**kwargs):
         warn('no SpatialDropout2D layer in keras version: %s'%__kv__)
         SpatialDropout2D = Dropout
 
-    assert(len(input_shape)==3 and input_shape[2]==3)
-    set_image_data_format('channels_last')
+    # channels_first required so lstm treats image bands as ordered sequence
+    input_dims = len(input_shape)
+    assert(((input_dims==3) and (input_shape[0]==3)) or
+           ((input_dims==4) and (input_shape[1]==3)))
+    assert(image_data_format()=='channels_first')
 
-
-    if len(input_shape)==3:
+    if input_dims==3:
         lstm_input_shape = [None]+list(input_shape)
         cnn_input_shape = input_shape
-    elif len(input_shape)==4:
+    elif input_dims==4:
         lstm_input_shape = input_shape
         cnn_input_shape = input_shape[1:]
     
