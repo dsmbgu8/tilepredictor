@@ -18,11 +18,12 @@ do_flip=True
 do_shift=True
 subpixel_shift = False
 
+random_state = 42
 augment_train_params = {
     'zoom_range': (1.0, 1.1),
     'rotation_range': (0, 180),
     'shear_range': (0, 0),
-    'translation_range': (-4, 4),
+    'translation_range': (-0.01, 0.01),
 }
 
 # do not perturb for test data
@@ -57,30 +58,28 @@ def imnormhist(img, num_bins=256):
 
     return im2.reshape(img.shape)
 
-def imfastwarp(img, tf, output_shape=[], mode=warp_mode, img_wf=[]):
+def imfastwarp(img, tf, output_shape=[], mode=warp_mode, img_buf=[]):
     """
     This wrapper function is about five times faster than
     skimage.transform.warp.
     """
-    m = tf.params
-
+    tfm = tf.params
     nb = img.shape[2]
     nr,nc = output_shape if len(output_shape)==2 else img.shape[:2]
-    if len(img_wf)==0:
-        img_wf = np.zeros((nr,nc,nb), dtype=img_type)
+    if len(img_buf)==0:
+        img_buf = np.zeros((nr,nc,nb), dtype=img_type)
 
     for k in xrange(nb):
-        img_wf[..., k] = warpfast(img[..., k], m, mode=mode,
-                                  output_shape=output_shape)
-    return img_wf
+        img_buf[..., k] = warpfast(img[..., k], tfm, mode=mode,
+                                   output_shape=output_shape)
+    return img_buf
 
 ## TRANSFORMATIONS ##
 def build_augmentation_transform(center_shift, zoom=1.0, rotation=0,
                                  shear=0, translation=(0, 0)):
     tform_center = SimilarityTransform(translation=-center_shift)
     tform_uncenter = SimilarityTransform(translation=center_shift)
-
-    tform_augment = AffineTransform(scale=(1/zoom, 1/zoom),
+    tform_augment = AffineTransform(scale=(1.0/zoom, 1.0/zoom),
                                     rotation=np.deg2rad(rotation),
                                     shear=np.deg2rad(shear),
                                     translation=translation)
@@ -168,25 +167,22 @@ def random_perturbation_transform(center_shift, zoom_range, rotation_range,
     return build_augmentation_transform(center_shift, zoom, rotation, shear,
                                         translation)
 
-def perturb_and_dscrop(img, tforms_ds, augment_params, target_sizes,
+def perturb_and_dscrop(img, tforms_ds, augment_params, target_size,
                        mode=warp_mode, img_buf=[]):
 
     tform_augment = random_perturbation_transform(**augment_params)
-    # return [skimage.transform.warp(img, tform_ds + tform_augment,
-    #                                output_shape=target_size,
-    #                                mode='reflect').astype('float32')
-    #         for tform_ds in ds_transforms]
-
     ntransform = len(tforms_ds)
     if len(img_buf)==0:
         img_buf = np.zeros([ntransform]+list(img.shape))
     
     for i in range(ntransform):
+        # yield skimage.transform.warp(img, tform_ds + tform_augment,
+        #                              output_shape=target_size,
+        #                              mode='reflect').astype('float32')
+        
         yield imfastwarp(img, tforms_ds[i] + tform_augment,
-                         output_shape=target_sizes[i], mode=mode)
-                         #img_wf=img_buf[i])
-
-
+                         output_shape=target_size, mode=mode,
+                         img_buf=img_buf[i])
 
 ## REALTIME AUGMENTATION ##
 def perturb_gen(imgdata, imglabs, ds_factor=1.0, npos=1, nneg=1, test=False,
@@ -227,24 +223,42 @@ def perturb_gen(imgdata, imglabs, ds_factor=1.0, npos=1, nneg=1, test=False,
     assert((nbands>=1) and (nbands<=4))
         
     img_size = [nrows,ncols]
-    input_sizes = [img_size,img_size]
+    target_size = img_size
     center_shift = np.array(img_size)/2.-0.5
-            
+
+    # base transform
     ds_transforms = [
-        build_ds_transform(ds_factor, img_size, input_sizes[0])
+        build_ds_transform(ds_factor, img_size, target_size)
     ]
     
-    if not test and add_rot45:
-        # generate two perturbed, downsampled outputs: original+rot45
-        ds_transforms.append(
-            build_ds_transform(ds_factor, img_size, input_sizes[1]) + \
-            build_augmentation_transform(center_shift, rotation=45))
-        augment_params = train_params.copy()
-    else:
+    if test:
         # just apply downsample operation, don't augment/replicate
         augment_params = test_params.copy()
+    else:
+        if add_rot45:
+            # generate two perturbed, downsampled outputs: original+rot45
+            ds_transforms.append(
+                build_ds_transform(ds_factor, img_size, target_size) + \
+                build_augmentation_transform(center_shift, rotation=45))
+        augment_params = train_params.copy()
+
     
     augment_params['center_shift'] = center_shift
+
+    if 'translation_range' in augment_params:
+        # convert translation percentages into pixel coords
+        trmin,trmax=augment_params['translation_range']
+        trdim = min(img_size)
+        if abs(trmin)>=0 and abs(trmin)<=1:
+            trmin = trmin*trdim
+        if abs(trmax)>=0 and abs(trmax)<=1:
+            trmax = trmax*trdim
+
+        # make sure min/max are at least \pm 1 
+        trmin = int(trmin if abs(trmin)>=1 else np.sign(trmin))
+        trmax = int(trmax if abs(trmax)>=1 else np.sign(trmax))
+        augment_params['translation_range'] = (trmin,trmax)            
+    
     img_buf = np.zeros([len(ds_transforms)]+img_size+[nbands])            
     
     for i in range(nimg):
@@ -257,7 +271,7 @@ def perturb_gen(imgdata, imglabs, ds_factor=1.0, npos=1, nneg=1, test=False,
         nrep = (nneg if labi[1]==0 else npos) if not test else 1
         for _ in range(nrep):
             img_a = perturb_and_dscrop(imgi, ds_transforms, augment_params,
-                                       input_sizes, img_buf=img_buf)
+                                       target_size, img_buf=img_buf)
             for img_ai in img_a:
                 # swap band order to fit into [nimg,nband,nrow,ncol] output
                 img_ao = img_ai if not transpose else img_ai.transpose(transpose)
@@ -296,7 +310,53 @@ def perturb_batch(imgdata, imglabs, ds_factor=1.0, naugpos=1, naugneg=1,
         i+=1
 
     return imgs_out, labs_out
-    
+
+def imaugment_batches(X_train,y_train,n_batches,transpose=[0,1,2],
+                     random_state=random_state):
+    from sklearn.model_selection import StratifiedShuffleSplit
+    train_rot_range=180.0
+    train_shear_range=10.0 # shear degrees
+    train_shift_range=0.1 # percentage of rows/cols to shift
+    train_zoom_range=0.1 # range = (1-zoom,1+zoom) percent
+    train_imaugment_params = dict(
+        zoom_range = (1.0-train_zoom_range, 1.0+train_zoom_range),
+        rotation_range = (-train_rot_range, train_rot_range),
+        shear_range = (-train_shear_range, -train_shear_range),
+        translation_range = (-train_shift_range, train_shift_range),
+    )
+    batch_transpose = [0]+[i+1 for i in transpose]
+
+    # compute batch size wrt number of augmented samples
+    batch_size = int(len(X_train)/n_batches)
+    #batch_step = max(3,int(n_batches/10))
+    #test_batch = int(n_batches // batch_step)
+    #test_batch_idx = np.linspace(test_batch,n_batches-test_batch,batch_step)                
+    #test_batch_idx = np.unique(np.round(test_batch_idx))
+    split_state = random_state
+    try:
+        while(1):
+            sss = StratifiedShuffleSplit(n_splits=n_batches,
+                                         train_size=batch_size,
+                                         random_state=split_state)
+            split_state = split_state+1
+            X_batch,y_batch = [],[]
+            X_train_batch,y_train_batch = [],[]
+            for bi,(batch_idx,_) in enumerate(sss.split(y_train,y_train)):                
+                X_batch,y_batch = collect_batch(X_train,y_train,
+                                                batch_idx=batch_idx,
+                                                imgs_out=X_batch,
+                                                labs_out=y_batch)
+
+                X_train_batch,y_train_batch = imaugment_perturb(X_batch,y_batch,
+                                                                imgs_out=X_train_batch,
+                                                                labs_out=y_train_batch)
+
+                yield X_train_batch.transpose(batch_transpose), y_train_batch
+
+    except KeyboardInterrupt:
+        print('User interrupt, saving model')
+        #self.save_weights(out_weightf)
+
 if __name__ == '__main__':
     import pylab as pl
     from scipy.io import loadmat

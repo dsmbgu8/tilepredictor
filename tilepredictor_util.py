@@ -39,10 +39,6 @@ metrics_sort = ['precision','recall','fscore']
 ORDER_NEAREST = 0
 ORDER_LINEAR  = 1
 
-def is_collection(X):
-    from skimage.io import ImageCollection
-    return type(X)==ImageCollection
-
 def load_json(jsonf):
     with open(jsonf,'r') as fid:
         return json.load(fid)
@@ -548,14 +544,6 @@ def resize_tile(tile,tile_shape=[],resize='resize',dtype=np.uint8,verbose=0):
               'type=%s, shape=%s, '
               'range = [%.3f, %.3f]'%(str(otype),str(oshape),omin,omax))
     return tile
-
-def imgfiles2collection(imgfiles,load_func,conserve_memory=True,**kwargs):
-    from skimage.io import ImageCollection
-    return ImageCollection(imgfiles,load_func=load_func,
-                           conserve_memory=True,**kwargs)
-
-def imgfiles2array(imgfiles,load_func,**kwargs):
-    return imgfiles2collection(imgfiles,load_func,**kwargs).concatenate()
 
 def tilefile2ul(tile_imagef):
     tile_base = basename(tile_imagef)

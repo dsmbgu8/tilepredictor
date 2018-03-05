@@ -1,6 +1,6 @@
 
 """
-Modified version of skimage.io.collections.py that handles array slicing.
+Modified version of skimage.io.collections that handles array shapes/slicing.
 
 Data structures to hold collections of images, with optional caching.
 """
@@ -450,3 +450,19 @@ class MultiImage(ImageCollection):
     @property
     def filename(self):
         return self._filename
+
+#  ----- start bbue (Mon Mar  5 08:21:55 2018) ------------------------------ 
+#  added a few misc utility functions
+def is_collection(X):    
+    return type(X)==ImageCollection
+
+def imgfiles2collection(imgfiles,load_func,conserve_memory=True,**kwargs):
+    from skimage.io import ImageCollection
+    return ImageCollection(imgfiles,load_func=load_func,
+                           conserve_memory=True,**kwargs)
+
+def imgfiles2array(imgfiles,load_func,**kwargs):
+    return imgfiles2collection(imgfiles,load_func,**kwargs).concatenate()
+
+#  ----- end bbue (Mon Mar  5 08:21:55 2018) -------------------------------- 
+    
