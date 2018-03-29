@@ -256,7 +256,11 @@ class ImageCollection(object):
         if hasattr(n, '__index__'):
             n = n.__index__()
 
-        if type(n) not in [int, slice]:
+        if hasattr(n, '__len__'):
+            if hasattr(n, 'shape'):
+                n = n.tolist()
+            
+        if type(n) not in [int, slice, list]:
             raise TypeError('slicing must be with an int or slice object')
 
         if type(n) is int:
@@ -289,7 +293,11 @@ class ImageCollection(object):
             # object. Any loaded image data in the original ImageCollection
             # will be copied by reference to the new object.  Image data
             # loaded after this creation is not linked.
-            fidx = range(self._numframes)[n]
+
+            if type(n) == slice:
+                fidx = range(self._numframes)[n]
+            elif type(n) == list:
+                fidx = [int(ni) for ni in n]
             new_ic = copy(self)
 
             if self._frame_index:
@@ -311,7 +319,7 @@ class ImageCollection(object):
 
             #  ----- start bbue (Thu Nov  2 17:22:25 2017) ------------------------------ 
             #  added shape variable
-            new_ic.shape = tuple([new_ic._numframes]+self.shape[1:])
+            new_ic.shape = tuple([new_ic._numframes]+list(self.shape[1:]))
             #  ----- end bbue (Thu Nov  2 17:22:25 2017) ------------------------------ 
 
             return new_ic
@@ -395,7 +403,6 @@ def imread_collection_wrapper(imread):
                                load_func=imread)
     return imread_collection
 
-
 class MultiImage(ImageCollection):
 
     """A class containing a single multi-frame image.
@@ -451,18 +458,4 @@ class MultiImage(ImageCollection):
     def filename(self):
         return self._filename
 
-#  ----- start bbue (Mon Mar  5 08:21:55 2018) ------------------------------ 
-#  added a few misc utility functions
-def is_collection(X):    
-    return type(X)==ImageCollection
 
-def imgfiles2collection(imgfiles,load_func,conserve_memory=True,**kwargs):
-    from skimage.io import ImageCollection
-    return ImageCollection(imgfiles,load_func=load_func,
-                           conserve_memory=True,**kwargs)
-
-def imgfiles2array(imgfiles,load_func,**kwargs):
-    return imgfiles2collection(imgfiles,load_func,**kwargs).concatenate()
-
-#  ----- end bbue (Mon Mar  5 08:21:55 2018) -------------------------------- 
-    

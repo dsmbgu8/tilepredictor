@@ -12,6 +12,10 @@ from windowsequence import WindowSequence
 
 default_load_func = 'tilepredictor_util.imread_image'
 
+batch_size = 32
+n_epochs = 2000
+n_batches = n_epochs//batch_size
+
 test_epoch = 1
 save_epoch = 1
 num_gpus = 1
@@ -319,7 +323,6 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
         rwin = rwin.reshape([-1,tile_dim,tile_dim,3])
         # only keep tiles that contain nonzero values
         #rmask[:] = rwin.reshape(rwin.shape[0],-1).any(axis=1)
-
         nkeep = np.count_nonzero(rmask)
         if nkeep!=0:
             rshapei = [nkeep,tile_dim,tile_dim,3]
@@ -341,7 +344,6 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
 
             rpred = np.int8(to_binary(rprob))
             predtime += (gettime()-predtime)
-
             posttime = gettime()
             # predi = [nkeep,1] softmax class predictions
 
@@ -494,8 +496,10 @@ if __name__ == '__main__':
                         help="Random seed (default=%d)"%random_state)
     
 
-    parser.add_argument("-d", "--tile_dim", type=int, default=tile_dim,
+    parser.add_argument("--tile_dim", type=int, default=tile_dim,
                         help="Dimension of input tiles")
+    parser.add_argument("--crop_dim", type=int, 
+                        help="Dimension of cropped input tiles (default=tile_dim)")
     parser.add_argument("--tile_bands", type=int, default=tile_bands,
                         help="Number of bands in each tile image (default=%d)"%tile_bands)
 
@@ -507,10 +511,14 @@ if __name__ == '__main__':
     parser.add_argument("--datagen_file", help="Data generator parameter file",
                         type=str, default=datagen_paramf)
 
+    parser.add_argument("-e", "--epochs", type=int, default=n_epochs,
+                        help="Total number of training epochs (default=%d)"%n_epochs)
     parser.add_argument("--test_epoch", type=int, default=test_epoch,
                         help="Epochs between testing (default=%d)"%test_epoch)
     parser.add_argument("--test_percent",type=float, default=0.2,
                         help="Percentage of test data to use during validation")
+    parser.add_argument("--stop_early", type=int, 
+                        help="Epochs to consider for early stopping (default=epochs)")
     parser.add_argument("--save_epoch", type=int, default=save_epoch,
                         help="Epochs between save cycles (default=%d)"%save_epoch)
     #parser.add_argument("--save_preds", action='store_true',
@@ -543,7 +551,7 @@ if __name__ == '__main__':
                         help="Method to resize images (default=%s)"%tile_resize)
     
     # misc
-    parser.add_argument("--pred_best", action='store_true',
+    parser.add_argument("--load_best", action='store_true',
                         help="Load best model in state_dir and compute/save preds for test_file'")
     parser.add_argument("--clobber", action='store_true',
                         help="Overwrite existing files.")
@@ -578,11 +586,13 @@ if __name__ == '__main__':
     model_flavor  = args.model_flavor
     
     tile_dim      = args.tile_dim
+    crop_dim      = args.crop_dim or tile_dim
     batch_size    = args.batch_size
     test_file     = args.test_file
 
     mean_file     = args.mean_file
     datagen_file  = args.datagen_file
+    n_epochs      = args.epochs
     test_epoch    = args.test_epoch
     test_percent  = args.test_percent
     save_epoch    = args.save_epoch
@@ -591,7 +601,8 @@ if __name__ == '__main__':
     balance_train = args.balance
     prob_thresh   = args.prob_thresh
     thresh_str    = '' if prob_thresh==0 else '%d'%prob_thresh
-
+    stop_early    = args.stop_early
+    
     # output directories
     state_dir     = args.state_dir
     output_dir    = args.output_dir or state_dir
@@ -604,7 +615,7 @@ if __name__ == '__main__':
     tile_bands    = args.tile_bands
     tile_resize   = args.resize
         
-    pred_best     = args.pred_best
+    load_best     = args.load_best
     module_func   = args.load_func
     
     save_model    = True
@@ -622,13 +633,16 @@ if __name__ == '__main__':
     do_show       = args.plot
     
     tile_shape    = [tile_dim,tile_dim]
+    crop_shape    = [crop_dim,crop_dim]
     input_shape   = [tile_shape[0],tile_shape[1],tile_bands]
 
     mean_image = mean_file
     if mean_file:
         mean_image = imread_image(mean_file)
 
-    if pred_best:
+    if load_best:
+        model_meta,model_weightf = find_saved_models(state_dir,model_package,
+                                                     model_flavor)
         save_preds = True
 
     n_classes = 2
@@ -655,7 +669,8 @@ if __name__ == '__main__':
         return pre
 
     debug=0
-    def load_tile(tilef,tile_shape=tile_shape,doplot=False,verbose=debug):
+    def load_tile(tilef,tile_shape=tile_shape,crop_shape=crop_shape,
+                  doplot=False,verbose=debug):
         tile = load_func(tilef,verbose=verbose)
         if tile.dtype == np.uint8:
             dtype = np.uint8
@@ -664,7 +679,7 @@ if __name__ == '__main__':
         else:
             raise Exception('preprocessing functions for dtype "%s" not implemented'%str(tile.dtype))
         tile = resize_tile(tile,tile_shape=tile_shape,resize=tile_resize,
-                           dtype=dtype)
+                           crop_shape=crop_shape, dtype=dtype)
         return preprocess_tile(tile,doplot=doplot,verbose=verbose)
 
     if train_file or test_file:
@@ -699,6 +714,7 @@ if __name__ == '__main__':
 
             n_batches = len(X_train)//batch_size           
             callback_params=dict(monitor='val_loss',
+                                 stop_early=stop_early,
                                  save_epoch=save_epoch,
                                  save_preds=save_preds,
                                  save_model=save_model,
@@ -727,7 +743,11 @@ if __name__ == '__main__':
         pred_prob = pred_dict['pred_prob']
 
         pred_mets = compute_metrics(to_binary(y_test),pred_labs)
+        
         pred_file = splitext(test_file)[0]+'_pred.txt'
+        model_dir = model.model_dir
+        if model_dir and pathexists(model_dir):
+            pred_file = pathjoin(model_dir,pred_file)
         write_predictions(pred_file, test_image_files, to_binary(y_test),
                           pred_labs, pred_prob, pred_mets, fnratfpr=0.01)
         print('Saved test predictions to "%s"'%pred_file)

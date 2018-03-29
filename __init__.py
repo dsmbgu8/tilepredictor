@@ -4,7 +4,7 @@ import os, sys
 tilepredictor_path = os.path.abspath(os.path.split(__file__)[0])
 sys.path.append(tilepredictor_path)
 
-from .collections import ImageCollection
+from .imagecollection import *
 from .tilepredictor_util import *
 from .tilepredictor import *
 

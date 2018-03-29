@@ -389,10 +389,10 @@ def write_predictions(predf, test_ids, test_lab, pred_lab, pred_prob, pred_mets,
         # convert pred_prob values into probability of positive class
         prob_pos = np.where(pred_lab==1,pred_prob,1.0-pred_prob)
         optfpr,optfnr,fnratfprv = fnrfpr(test_lab,prob_pos,fnratfpr=fnratfpr)
-        mstr += '\n# fpr=%9.6f, fnr=%9.6f, fnr@%9.6f%%fpr=%.6f'%(optfpr*100,
-                                                               optfnr*100,
-                                                               fnratfpr*100,
-                                                               fnratfprv*100) 
+        mstr += '\n# fpr=%9.6f, fnr=%9.6f, fnr@%9.6f%%fpr=%9.6f'%(optfpr*100,
+                                                                  optfnr*100,
+                                                                  fnratfpr*100,
+                                                                  fnratfprv*100) 
     
     n_lab = len(test_ids)
     m_err = test_lab!=pred_lab
@@ -484,8 +484,18 @@ def imread_image(f,bands=3,dtype=np.uint8,plugin=None,verbose=0):
               'range = %s'%str(map(list,np.c_[omin,omax])))
     return imgout
 
-def resize_tile(tile,tile_shape=[],resize='resize',dtype=np.uint8,verbose=0):
+def resize_tile(tile,tile_shape=[],crop_shape=[],resize='resize',
+                pad_tile=True,dtype=np.uint8,verbose=0):
     assert(len(tile_shape)==2)
+    if len(crop_shape)==0:
+        crop_shape = tile_shape
+
+    if pad_tile and tile.shape[0] != tile.shape[1]:
+        max_dim = max(tile_shape[:2])
+        new_shape = (max_dim,max_dim)
+        warn('padding %s tile to %s'%(str(tile.shape),str(new_shape)))
+        tile = extract_tile(tile,(0,0),max_dim)
+        
     itype = tile.dtype
     ishape = tile.shape
     if verbose:
@@ -493,17 +503,25 @@ def resize_tile(tile,tile_shape=[],resize='resize',dtype=np.uint8,verbose=0):
 
     ifloat = itype in (np.float32,np.float64)
     dfloat = dtype in (np.float32,np.float64)
+    
+    #if (tile.shape[:2]==tile_shape) and (tile_shape==crop_shape):
         
     if ifloat and dtype==np.uint8 and (tile.ndim==2 or tile.shape[2]==1):
         # stretch 1-band float32 into 24bit rgb
+        warn('stretching 1-band float32 image into 4-band uint8 rgba')
         nr,nc = tile.shape[:2]
         tile = np.uint32(((2**24)-1)*tile.squeeze()).view(dtype=np.uint8)
-        tile = tile.reshape([nr,nc,4])[...,:-1]     
-    elif itype==np.uint8 and tile.shape[2]==4:
+        tile = tile.reshape([nr,nc,4])
+        
+    if tile.dtype==np.uint8 and tile.shape[2]==4:
         # drop alpha from rgba
         tile = tile[:,:,:-1]
 
-    if resize=='extract':
+    if resize=='resize':
+        tile = imresize(tile,tile_shape)
+        
+    elif resize=='extract':
+        # extract with random (row,col) offset
         roff = tile.shape[0]-tile_shape[0]
         coff = tile.shape[1]-tile_shape[1]
         r = 0 if roff<0 else randint(roff)
@@ -512,17 +530,25 @@ def resize_tile(tile,tile_shape=[],resize='resize',dtype=np.uint8,verbose=0):
             tile = extract_tile(tile,(r,c),tile_shape[0])
 
     elif resize=='crop':
-        tile = imcrop(tile,tile_shape)
+        # center crop
+        tile = imcrop(tile,crop_shape)
 
     elif resize=='zoom_crop':
-        # scale image by ratio of new vs. current size, crop into tile_shape
-        assert(all(tile.shape[i]<=tile_shape[i] for i in range(2)))
-        rs_shape = [int(tile.shape[i]*(tile_shape[i]/tile.shape[i]))+1
-                    for i in range(2)]
-        tile = imresize(tile,rs_shape)
+        # resize to crop_shape, then crop to tile_shape
+        # crop_shape must be >= tile_shape
+        assert(all(crop_shape[i]>=tile_shape[i] for i in range(2)))
+        tile = imresize(tile,crop_shape)
         tile = imcrop(tile,tile_shape)
-    else:
+        
+    elif resize=='crop_zoom':
+        # crop into crop_shape, then resize to tile_shape
+        # tile.shape must be >= crop_shape
+        assert(all(tile.shape[i]>=crop_shape[i] for i in range(2)))
+        tile = imcrop(tile,crop_shape)        
         tile = imresize(tile,tile_shape)
+        
+    else:
+        raise Exception('unknown resize method "%s"'%resize)
 
     if dfloat:
         assert((tile.min()>=-1.0) and (tile.max()<=1.0))
@@ -537,11 +563,9 @@ def resize_tile(tile,tile_shape=[],resize='resize',dtype=np.uint8,verbose=0):
         omin,omax = extrema(tile.ravel())
         otype = tile.dtype
         oshape = tile.shape
-        print('Before resize (mode=%s): '
-              'type=%s, shape=%s, '
+        print('Before resize (mode=%s): type=%s, shape=%s, '
               'range = [%.3f, %.3f]'%(resize,str(itype),str(ishape),imin,imax))
-        print('After resize:  '
-              'type=%s, shape=%s, '
+        print('After resize:  type=%s, shape=%s, '
               'range = [%.3f, %.3f]'%(str(otype),str(oshape),omin,omax))
     return tile
 
@@ -744,13 +768,15 @@ def balance_classes(y,**kwargs):
     K = len(ulab)
     yc = counts(y)
     nsamp_tomatch = max(yc.values())
-    balance_idx = np.array([])
+    balance_idx = np.uint64([])
     if verbose:
         print('Total (unbalanced) samples: %d\n'%len(y))
 
     for j in range(K):
         idxj = np.where(y==ulab[j])[0]
         nj = len(idxj)
+        if nj<=1:
+            continue
         naddj = nsamp_tomatch-nj
         addidxj = idxj[np.random.randint(0,nj-1,naddj)]
         if verbose:
@@ -786,15 +812,18 @@ def fill_batch(X_batch,y_batch,batch_size,balance=True):
         y_batch = y_batch[np.newaxis]
 
     batch_lab = to_binary(y_batch)
+    if len(np.unique(batch_lab))==1:
+        return X_batch, y_batch
     n_cur = len(y_batch)
     n_aug = batch_size-n_cur
     if n_aug <= 0:
         warn('len(X_batch) <= batch_size, nothing to fill')
         return [],[]
-    aug_idx = randperm(batch_size) % n_cur
+    aug_idx = np.uint64(randperm(batch_size) % n_cur)
     if balance:
-        bal_idx = balance_classes(batch_lab[aug_idx],verbose=False)
-        aug_idx = np.r_[aug_idx[bal_idx],aug_idx]
+        bal_idx = balance_classes(batch_lab[aug_idx],verbose=False)        
+        if len(bal_idx)!=0:
+            aug_idx = np.r_[aug_idx[bal_idx],aug_idx]
     aug_idx = aug_idx[randperm(len(aug_idx),n_aug)]
     return X_batch[aug_idx], y_batch[aug_idx]
 

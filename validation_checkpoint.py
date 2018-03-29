@@ -10,7 +10,8 @@ from keras.callbacks import Callback
 
 class ValidationCheckpoint(Callback):
     def __init__(self,val_monitor='val_loss',model_dir=None, mode='auto',
-                 period=1,warmup=5,max_vanish=5,initial_epoch=0,
+                 test_period=1,save_period=None,
+                 initial_epoch=0,warmup_epoch=5,max_vanish=5,
                  save_best_model=True,save_best_preds=True,
                  initial_monitor=None,pid=None,verbose=0):
         super(ValidationCheckpoint, self).__init__()
@@ -26,7 +27,7 @@ class ValidationCheckpoint(Callback):
         self.pred_labs    = []
         self.pred_prob    = []
 
-        self.statemsg     = None
+        self.state_msg    = None
         self.val_monitor  = val_monitor
 
         if mode == 'auto':
@@ -38,10 +39,17 @@ class ValidationCheckpoint(Callback):
             self.val_mode = mode
         
         self.val_func     =  np.max if self.val_mode=='max' else np.min
-        self.val_best     = -np.inf if self.val_mode=='max' else np.inf
+        self.val_init     = -np.inf if self.val_mode=='max' else np.inf
+        self.val_best     = self.val_init
         self.epoch_best   = initial_epoch if initial_monitor else 0
-        self.period       = period
-        self.warmup       = warmup
+
+        self.val_prev     = self.val_init
+        self.epoch_prev   = self.epoch_best
+        
+        self.test_period  = test_period
+        self.save_period  = save_period
+
+        self.warmup       = warmup_epoch
         self.max_vanish   = max_vanish
         self.epoch_vanish = 0
         
@@ -77,16 +85,24 @@ class ValidationCheckpoint(Callback):
         val_cmp = self.val_func([self.val_best,monitor_value])
         msg = 'Epoch %05d: '%epoch
         new_best = False
-        if val_cmp==monitor_value and val_cmp != self.val_best:        
-            if epoch > self.epoch_best:
+        if val_cmp == monitor_value and val_cmp != self.val_best:
+            if epoch >= self.epoch_best:
                 new_best = True
                 msg += 'New '
+            self.val_prev = self.val_best
+            self.epoch_prev = self.epoch_best
             self.val_best = monitor_value
             self.epoch_best = epoch
             
         msg += 'best %s value=%.6f'%(self.val_monitor,monitor_value)
+        if epoch < self.warmup:
+            msg += '(epoch < warmup epochs, not stored)'
+            self.val_best = self.val_prev
+            self.epoch_best = self.epoch_prev
+        
         if verbose:
             print(msg)
+
         return new_best
             
     def update_ids(self,test_ids,verbose=1):
@@ -120,15 +136,26 @@ class ValidationCheckpoint(Callback):
 
     def collect_predictions(self):
         return self.pred_labs
-        
+
+    def print_state(self,reset=True):
+        if self.state_msg:
+            print('\n'+self.state_msg+'\n')
+            if reset:
+                self.state_msg = None
+            
     def on_train_begin(self, logs=None):
         logs = logs or {}
-                        
+        self.train_start_time = gettime()
+        self.print_state()
+            
     def on_train_end(self, logs=None):
         logs = logs or {}
+        self.train_stop_time = gettime()
+        self.print_state()
 
-    def on_batch_begin(self, batch, logs=None):
-        logs = logs or {}
+    # def on_batch_begin(self, batch, logs=None):
+        # logs = logs or {}
+        # self.batch_start_time = gettime()        
         # if self.debug_batch:
         #     print('\non_batch_begin:')
         #     print('dir(self): "%s"'%str((dir(self))))
@@ -140,8 +167,9 @@ class ValidationCheckpoint(Callback):
         #     print('class_stats(y_batch):')                    
         #     class_stats(batch[1],verbose=1)
 
-    def on_batch_end(self, batch, logs=None):
-        logs = logs or {}
+    # def on_batch_end(self, batch, logs=None):
+        # logs = logs or {}
+        # self.batch_stop_time = gettime()
         # if self.debug_batch:
         #     print('\non_batch_end:')
         #     print('dir(self): "%s"'%str((dir(self))))            
@@ -157,17 +185,15 @@ class ValidationCheckpoint(Callback):
     def on_epoch_begin(self, epoch, logs=None):
         logs = logs or {}
         self.epoch_start_time = gettime()
-        if self.statemsg:
-            print('\n'+self.statemsg+'\n')
-            self.statemsg = None
+        self.print_state()
             
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
         self.epoch_end_time  = gettime()
         etime = self.epoch_end_time-self.epoch_start_time
-        statemsg = 'Epoch %05d: %.3f seconds processing time'%(epoch+1,etime)
+        state_msg = 'Epoch %05d: %.3f seconds processing time'%(epoch+1,etime)
         logs['cputime'] = etime
-        if self.validation_data and (epoch % self.period) == 0:
+        if self.validation_data and (epoch % self.test_period) == 0:
             n_labs = len(self.test_labs)
             n_ids = len(self.test_ids)
             if n_labs==0:
@@ -219,40 +245,57 @@ class ValidationCheckpoint(Callback):
                 self.metrics.setdefault(m,[])
                 self.metrics[m].append(val)
                 mstr.append('%s=%9.6f'%(m,val*100))
-            statemsg += '\nValidation '+(', '.join(mstr))
+            state_msg += '\nValidation '+(', '.join(mstr))
 
             val_epoch = np.float32(logs[self.val_monitor])
-            
-            if not self.update_monitor(epoch,val_epoch,verbose=0):
+
+            new_best = self.update_monitor(epoch,val_epoch,verbose=0)
+            if epoch < self.warmup:
+                state_msg += '\nEpoch %d < warmup steps (=%d), no outputs written.'%(epoch,self.warmup)
+            elif 'val_fscore' in logs and logs['val_fscore']==0:
+                state_msg += '\nIgnoring val_fscore=0.0, no outputs written.'            
+            elif new_best:
+                # new best score, update best and report status
+                state_msg += '\nNew best %s=%.6f'%(self.val_monitor,self.val_best)
+                fmtdict = {'epoch':epoch,self.val_monitor:self.val_best}
+                if self.save_model:
+                    modelf = self.model_iterf.format(**fmtdict)
+                    self.model.save(modelf)
+                    state_msg += '\nSaved best model to %s'%modelf
+
+                if self.save_preds:
+                    predsf = self.preds_iterf.format(**fmtdict)                        
+                    write_predictions(predsf, test_ids, test_labs,
+                                      self.pred_labs, self.pred_prob,
+                                      pred_metrics, fnratfpr=0.01)
+                    state_msg += '\nSaved best predictions to %s'%predsf
+
+            elif self.save_period and (epoch % self.save_period)==0:
+                # periodic save
+                state_msg += '\nPeriodic save triggered, %s=%.6f'%(self.val_monitor,val_epoch)
+                fmtdict = {'epoch':epoch,self.val_monitor:val_epoch}
+                if self.save_model:
+                    modelf = self.model_iterf.format(**fmtdict)
+                    self.model.save(modelf)
+                    state_msg += '\nSaved periodic model to %s'%modelf
+
+                if self.save_preds:
+                    predsf = self.preds_iterf.format(**fmtdict)                        
+                    state_msg += '\nSaved periodic predictions to %s'%predsf
+                    write_predictions(predsf, test_ids, test_labs,
+                                      self.pred_labs, self.pred_prob,
+                                      pred_metrics, fnratfpr=0.01)
+                    
+            else: # not new_best
                 # current score doesn't beat the best, report status
-                statemsg += '\nCurrent best %s=%.6f @ epoch %d'%(self.val_monitor,self.val_best,
-                                                                 self.epoch_best)
+                state_msg += '\nCurrent best %s=%.6f @ epoch %d'%(self.val_monitor,self.val_best,
+                                                                  self.epoch_best)
                 if self.epoch_best != 0 and val_loss==0.0:
                     if self.epoch_vanish == self.max_vanish:
-                        statemsg += 'Epoch %d: nonzero gradient vanished for max_vanish (=%d) consecutive epochs, terminating training'%(epoch,self.max_vanish)
+                        state_msg += 'Epoch %d: nonzero gradient vanished for max_vanish (=%d) consecutive epochs, terminating training'%(epoch,self.max_vanish)
                         self.model.stop_training = True
                     self.epoch_vanish = self.epoch_vanish + 1                    
                 else:
                     self.epoch_vanish = 0
-            else:
-                # new best score, update best and report status
-                statemsg += '\nNew best %s=%.6f'%(self.val_monitor,self.val_best)
-                if self.save_preds or self.save_model:            
-                    if epoch < self.warmup:
-                        statemsg += '\nEpoch %d < warmup steps (=%d), no outputs written.'%(epoch,self.warmup)
-                    elif 'val_fscore' in logs and logs['val_fscore']==0:
-                        statemsg += '\nIgnoring val_fscore=0.0, no outputs written.'
-                    else:
-                        fmtdict = {'epoch':epoch,self.val_monitor:self.val_best}
-                        if self.save_model:
-                            modelf = self.model_iterf.format(**fmtdict)
-                            self.model.save(modelf)
-                            statemsg += '\nSaved best model to %s'%modelf
-                        
-                        if self.save_preds:
-                            predsf = self.preds_iterf.format(**fmtdict)                        
-                            statemsg += '\nSaved best predictions to %s'%predsf
-                            write_predictions(predsf, test_ids, test_labs,
-                                              self.pred_labs, self.pred_prob,
-                                              pred_metrics, fnratfpr=0.01)
-        self.statemsg = statemsg
+                    
+        self.state_msg = state_msg
