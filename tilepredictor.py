@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-from __future__ import division, print_function, absolute_import, unicode_literals
+from __future__ import division, print_function, absolute_import
 import sys, os
 from glob import glob
 
@@ -10,32 +10,19 @@ from model_package import *
 
 from windowsequence import WindowSequence
 
+from LatLongUTMconversion import UTMtoLL
+
+from extract_patches_2d import *
+
 default_load_func = 'tilepredictor_util.imread_image'
 
 batch_size = 32
 n_epochs = 2000
 n_batches = n_epochs//batch_size
 
-test_epoch = 1
-save_epoch = 1
-num_gpus = 1
+test_period = 1
 
-def import_load_func(func_path):
-    import importlib
-    module_path,module_func = pathsplit(func_path)
-    path_msg = ''
-    if module_path != '':
-        if pathexists(module_path):            
-            path_msg = 'from path '+module_path
-            sys.path.append(module_path)
-        else:
-            warn('specified module_path "%s" does not exist'%module_path)
-        
-    print('Importing load_func: ',module_func,path_msg)
-    module,func = module_func.split('.')
-    func_lib = importlib.import_module(module)
-    load_func = getattr(func_lib, func)
-    return load_func
+num_gpus = get_num_gpus()
 
 def aximshow(ax,img,ylab,vmin=None,vmax=None,cmap=None):
     transpose = [1,0] if img.shape[0]>img.shape[1] else [0,1]
@@ -172,10 +159,9 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
         save_envi_output('prob',np.float32(img_prob),mapinfo)
         save_envi_output('vcon',np.float32(img_vcon),mapinfo)
         save_envi_output('pcon',np.float32(img_pcon),mapinfo)
-                
         img_vote = array2rgba(img_vote,  vmin=-max_vote,vmax=max_vote)
-        img_class = array2rgba(img_class,vmin=-1.0,vmax=1.0)
-        img_prob = array2rgba(img_prob,  vmin=-1.0,vmax=1.0)
+        img_class = array2rgba(img_class) #,vmin=-1.0,vmax=1.0)
+        img_prob = array2rgba(img_prob) #,  vmin=-1.0,vmax=1.0)
         img_vcon = array2rgba(img_vcon,  vmin=-1.0,vmax=1.0)
         img_pcon = array2rgba(img_pcon,  vmin=-1.0,vmax=1.0)
         save_png_output('pred',img_class)
@@ -186,11 +172,10 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
             
 
 def write_csv(csvf,imgid,pred_list,tile_dim,prob_thresh=0.0,img_map=None):
-    from LatLongUTMconversion import UTMtoLL
     # geolocate detections with .hdr files
     #tile_out = pred_out['pred_list']
 
-    header = ['imgid','line','samp','prob_pos']
+    header = ['imgid','row','col','prob_pos']
     assert(pred_list.shape[1]==len(header)-1)
 
     keep_mask = float32(pred_list[:,-1])>=prob_thresh
@@ -226,9 +211,10 @@ def write_csv(csvf,imgid,pred_list,tile_dim,prob_thresh=0.0,img_map=None):
 
 def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
                    preprocess=None, img_map=None, backend='tensorflow',
-                   lab_mask=[], verbose=0, transpose=False, do_show=False):
+                   lab_mask=[], verbose=0, transpose=False, print_status=True,
+                   do_show=False):
     from skimage.util.shape import view_as_windows
-
+        
     input_shape = model.layers[0].input_shape
     if backend=='tensorflow':
         # channels last
@@ -290,12 +276,15 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     rrange = np.arange(0,rows-tile_dim+1,stride)
     crange = np.arange(0,cols-tile_dim+1,stride)
     n_rb,n_cb = len(rrange),len(crange)
+    cb_den = max(1,n_cb // 1000)
+    batch_size = max(2*(n_cb//2),int(sqrt(n_cb))**2)//cb_den
+    
     pmsg = 'Collecting predictions'
-    print(pmsg+', window size = %d x %d tiles (tile_dim=%d, stride=%d)'%(n_rb,
-                                                                         n_cb,
-                                                                         tile_dim,
-                                                                         stride))
-    print_status = True
+    print(pmsg+', size = %d x %d tiles (tile_dim=%d, stride=%d)'%(n_rb,
+                                                                  n_cb,
+                                                                  tile_dim,
+                                                                  stride))
+    print('batch_size,cb_den: "%s"'%str((batch_size,cb_den)))
 
     pred_list = []    
     cidx = np.arange(n_cb,dtype=np.int32)
@@ -307,44 +296,121 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     img0 = preprocess_img_u8(np.zeros([1,tile_dim,tile_dim,3],dtype=np.uint8))
     prob0 = model.predict(img0.transpose(rtranspose))
     pred0 = np.int8(to_binary(prob0))
-    print('prob(X = [0.0]_%dx%d) = '%(tile_dim,tile_dim),prob0)
     img05 = preprocess_img_u8((255/2.0)*np.ones([1,tile_dim,tile_dim,3],dtype=np.uint8))
     prob05 = model.predict(img05.transpose(rtranspose))
-    print('prob(X = [0.5]_%dx%d) = '%(tile_dim,tile_dim),prob05)
     img1 = preprocess_img_u8(255*np.ones([1,tile_dim,tile_dim,3],dtype=np.uint8))
     prob1 = model.predict(img1.transpose(rtranspose))
+    print('prob(X = [0.0]_%dx%d) = '%(tile_dim,tile_dim),prob0)
+    print('prob(X = [0.5]_%dx%d) = '%(tile_dim,tile_dim),prob05)
     print('prob(X = [1.0]_%dx%d) = '%(tile_dim,tile_dim),prob1)
     
-    for rbeg in pbar(rrange):
-        preptime = gettime()
-        rend = rbeg+tile_dim
 
-        rwin = view_as_windows(img_rgb[rbeg:rend], tshape, step=stride)
-        rwin = rwin.reshape([-1,tile_dim,tile_dim,3])
+    for l in model.layers:
+        l.trainable = False
+    
+    from keras import backend as K
+    from keras.preprocessing.image import ImageDataGenerator, NumpyArrayIterator
+    model_predict = K.function([model.input, K.learning_phase()],
+                               [model.output])
+
+    #predict_generator(generator, steps=None, max_queue_size=10, workers=1, use_multiprocessing=False, verbose=0)
+
+    @threadsafe_generator
+    def tile_gen(img_rgb,tile_dim,stride,rtranspose):
+        nrows,ncols,_ = img_rgb.shape
+        nr = nrows-tile_dim+1
+        nc = ncols-tile_dim+1
+        rows = np.arange(0,nr,stride,dtype=np.int32)
+        cols = np.arange(0,nc,stride,dtype=np.int32)
+        yout = np.zeros([1,2])
+        for ij in range(len(rows)*len(cols)):
+            i = rows[ij // len(cols)]
+            j = cols[ij-i]
+            print('(row,col)',(i,j),'of',(nr,nc))
+            tile = img_rgb[i:i+tile_dim,j:j+tile_dim,:][np.newaxis]
+            yield preprocess(tile).transpose(rtranspose),yout
+
+
+    @threadsafe_generator
+    def win_gen(img_rgb,tile_dim,stride,rtranspose):
+        nrows,ncols,_ = img_rgb.shape
+        img_win = view_as_windows(img_rgb, tshape)
+        print('img_win.shape: "%s"'%str((img_win.shape)))
+        img_win = img_win[::stride,::stride]
+        nr = nrows-tile_dim+1
+        nc = ncols-tile_dim+1
+        rows = np.arange(0,nr,stride,dtype=np.int32)
+        cols = np.arange(0,nc,stride,dtype=np.int32)
+        print('img_win.shape (strided): "%s"'%str((img_win.shape)))
+        print('len(rows),len(cols): "%s"'%str((len(rows),len(cols))))
+        yout = np.zeros([1,2])
+        nwin = img_win.shape[0]*img_win.shape[1]
+        for ij in range(nwin):
+            i = ij // img_win.shape[0]
+            j = ij-i
+            tileij = img_win[i,j].reshape([1]+tshape)
+            print('tileij.shape: "%s"'%str((tileij.shape)))
+            
+            print('(row,col)',(i,j),'of',(nr,nc),'nwin',nwin)
+            yield preprocess(tileij).transpose(rtranspose)
+            
+
+    use_mp = False
+    n_workers = 5 if use_mp else 1
+    predictkw = dict(max_queue_size=10,workers=n_workers,use_multiprocessing=use_mp)
+                
+    #ntiles = len(rrange)*len(crange)
+    #ntgen = tile_gen(img_rgb,tile_dim,stride,rtranspose)
+    #ntgen = win_gen(img_rgb,tile_dim,stride,rtranspose)
+    #rprob = model.predict_generator(ntgen,ntiles,**predictkw)
+    #print(rprob), raw_input()
+    
+    use_npi = False 
+    use_seq = False
+
+    if use_npi:
+        _imggen = ImageDataGenerator()
+
+    for rbeg in pbar(rrange):
+        #preptime = gettime()
+        rend = rbeg+tile_dim
+        #img_row = img_rgb[rbeg:rend]
+        rwin = view_as_windows(img_rgb[rbeg:rend], tshape)        
+        rwin = rwin.reshape(rshape)
+        rwin = rwin[::stride]
+        
         # only keep tiles that contain nonzero values
-        #rmask[:] = rwin.reshape(rwin.shape[0],-1).any(axis=1)
+        rmask[:] = rwin.any(axis=tuple(range(1,rwin.ndim)))
         nkeep = np.count_nonzero(rmask)
         if nkeep!=0:
+            #nkeepb = batch_size*((nkeep//batch_size)+1
             rshapei = [nkeep,tile_dim,tile_dim,3]
-            rwini = rwin[rmask]
-            rinput = preprocess(rwini.reshape(rshapei))        
+            rinput = preprocess(rwin[rmask].copy().reshape(rshapei))
             rinput = rinput.transpose(rtranspose)
-            preptime += (gettime()-preptime)
-
-            predtime = gettime()
+            # preptime += (gettime()-preptime)
+            # predtime = gettime()
             # probi = [nkeep,2] softmax class probabilities
-            rprob = model.predict(rinput)
-            
-            #rprob = rprob.reshape([rstep,-1,2])
-            #rpred = rpred.reshape([rstep,-1])
-            #rsize = 32 #rinput.shape[0]/stride
-            #rstep = rinput.shape[0]/rsize
-            #rwseq = WindowSequence(rinput,batch_size=rsize)        
-            #rprob = model.predict_generator(rwseq,rstep)
+
+            nbatch = nkeep//batch_size
+            if use_npi:
+                ry = np.zeros(rinput.shape[0])
+                rinput_npi = NumpyArrayIterator(rinput, ry, _imggen,
+                                                batch_size=batch_size,
+                                                shuffle=False, seed=42)
+                rprob = model.predict_generator(rinput_npi,nbatch,**predictkw)
+            elif use_seq:
+                rinput_seq = WindowSequence(rinput,batch_size) 
+                rprob = model.predict_generator(rinput_seq,nbatch,**predictkw)
+            else:
+                rprob = np.zeros([nkeep,2])
+                for bj in range(nbatch+1):
+                    js,je = bj*batch_size,(bj+1)*batch_size
+                    js,je = min(nkeep-1,js),min(nkeep,je)
+                    rprob[js:je]=model_predict([rinput[js:je],0])[0]            
+
 
             rpred = np.int8(to_binary(rprob))
-            predtime += (gettime()-predtime)
-            posttime = gettime()
+            # predtime += (gettime()-predtime)
             # predi = [nkeep,1] softmax class predictions
 
             # if scale_probs:
@@ -363,6 +429,7 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
             #     print('prediction time: %0.3f seconds'%(gettime()-begtime))
             #     print('row block %d of %d'%(i,n_rb))
 
+        # posttime = gettime()
         pj = 0
         for j,cbeg in enumerate(crange):
             cend = cbeg+tile_dim
@@ -375,18 +442,17 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
                 # already know pred + prob for null entries
                 img_prob[rbeg:rend,cbeg:cend,:] += prob0[0]
                 img_pred[rbeg:rend,cbeg:cend,pred0] += 1
-                pred_list.append([rbeg,cbeg,prob0[0,1]])
-                
+                pred_list.append([rbeg,cbeg,prob0[0,1]])  
 
-        posttime += (gettime()-posttime)
+        #posttime += (gettime()-posttime)
 
     pred_list = np.float32(pred_list)
     print('total prediction time (%d tiles): %0.3f seconds'%(pred_list.shape[0],
                                                              gettime()-inittime))
     if print_status:
-        print('preprocessing time: %0.3f seconds'%(preptime/n_rb))
+        #print('preprocessing time: %0.3f seconds'%(preptime/n_rb))
         print('prediction time: %0.3f seconds'%(predtime/n_rb))
-        print('postprocessing time: %0.3f seconds'%(posttime/n_rb))
+        #print('postprocessing time: %0.3f seconds'%(posttime/n_rb))
 
 
     # get average probabilities for each class by normalizing by pred counts
@@ -513,16 +579,14 @@ if __name__ == '__main__':
 
     parser.add_argument("-e", "--epochs", type=int, default=n_epochs,
                         help="Total number of training epochs (default=%d)"%n_epochs)
-    parser.add_argument("--test_epoch", type=int, default=test_epoch,
-                        help="Epochs between testing (default=%d)"%test_epoch)
+    parser.add_argument("--test_period", type=int, default=test_period,
+                        help="Epochs between testing (default=%d)"%test_period)
     parser.add_argument("--test_percent",type=float, default=0.2,
                         help="Percentage of test data to use during validation")
     parser.add_argument("--stop_early", type=int, 
                         help="Epochs to consider for early stopping (default=epochs)")
-    parser.add_argument("--save_epoch", type=int, default=save_epoch,
-                        help="Epochs between save cycles (default=%d)"%save_epoch)
-    #parser.add_argument("--save_preds", action='store_true',
-    #                    help="Write preds to text file every save_epoch iterations'")
+    parser.add_argument("--save_period", type=int, 
+                        help="Epochs between periodic save cycles (default=None)")
     parser.add_argument("--save_test", action='store_true',
                        help="Write test data/labels to .npy files after loading")
     parser.add_argument("--conserve_memory", action='store_true',
@@ -555,7 +619,7 @@ if __name__ == '__main__':
                         help="Load best model in state_dir and compute/save preds for test_file'")
     parser.add_argument("--clobber", action='store_true',
                         help="Overwrite existing files.")
-    parser.add_argument("--num_gpus", type=int, default=0,
+    parser.add_argument("--num_gpus", type=int, default=num_gpus,
                         help="Number of GPUs to use (default=%d)"%num_gpus)
         
     # hdr file params for geolocalization (optional)
@@ -593,9 +657,9 @@ if __name__ == '__main__':
     mean_file     = args.mean_file
     datagen_file  = args.datagen_file
     n_epochs      = args.epochs
-    test_epoch    = args.test_epoch
+    test_period   = args.test_period
     test_percent  = args.test_percent
-    save_epoch    = args.save_epoch
+    save_period   = args.save_period
     conserve_mem  = args.conserve_memory
     save_test     = args.save_test
     balance_train = args.balance
@@ -645,6 +709,7 @@ if __name__ == '__main__':
                                                      model_flavor)
         save_preds = True
 
+
     n_classes = 2
     model = compile_model(input_shape,n_classes,tile_bands,
                           model_state_dir=state_dir,
@@ -653,7 +718,7 @@ if __name__ == '__main__':
                           model_weightf=model_weightf,
                           num_gpus=num_gpus)
 
-    load_func = import_load_func(module_func)
+    load_func = load_data.import_load_func(module_func)
     def preprocess_tile(img,model=model,doplot=False,verbose=0):
         pre = model.preprocess(img,transpose=True,verbose=verbose)
         if doplot:
@@ -679,7 +744,7 @@ if __name__ == '__main__':
         else:
             raise Exception('preprocessing functions for dtype "%s" not implemented'%str(tile.dtype))
         tile = resize_tile(tile,tile_shape=tile_shape,resize=tile_resize,
-                           crop_shape=crop_shape, dtype=dtype)
+                           crop_shape=crop_shape,dtype=dtype)
         return preprocess_tile(tile,doplot=doplot,verbose=verbose)
 
     if train_file or test_file:
@@ -698,11 +763,11 @@ if __name__ == '__main__':
         (X_train,y_train,train_image_files) = train_data
         (X_test,y_test,test_image_files) = test_data
         
-        assert((y_train.ndim == 2) and (y_train.shape[1]==2))
-        assert((y_test.ndim == 2) and (y_test.shape[1]==2))
+        assert((y_train.ndim == 2) and (y_train.shape[1] == n_classes))
+        assert((y_test.ndim  == 2) and (y_test.shape[1]  == n_classes))
 
         validation_data = (X_test,y_test)
-                  
+        validation_ids = test_image_files
         if train_file:
             datagen_params = load_datagen_params(datagen_file,verbose=1)
             
@@ -712,17 +777,16 @@ if __name__ == '__main__':
                                        fill_partial=True,shuffle=True,
                                        verbose=2)
 
-            n_batches = len(X_train)//batch_size           
+            n_batches = int(np.ceil(len(X_train)/batch_size))
             callback_params=dict(monitor='val_loss',
                                  stop_early=stop_early,
-                                 save_epoch=save_epoch,
                                  save_preds=save_preds,
                                  save_model=save_model,
-                                 test_epoch=test_epoch,
-                                 test_ids=test_image_files)
-            model.train(train_gen,n_epochs,n_batches,
-                        validation_data=validation_data,
-                        verbose=1,**callback_params)
+                                 test_period=test_period)
+            trhist = model.train(train_gen,n_epochs,n_batches,
+                                 validation_data=validation_data,
+                                 validation_ids=validation_ids,
+                                 verbose=1,**callback_params)
 
     if not model.initialized:
         print('Error: model not sucessfully initialized')
@@ -744,7 +808,7 @@ if __name__ == '__main__':
 
         pred_mets = compute_metrics(to_binary(y_test),pred_labs)
         
-        pred_file = splitext(test_file)[0]+'_pred.txt'
+        pred_file = basename(test_file)+'_pred.txt'
         model_dir = model.model_dir
         if model_dir and pathexists(model_dir):
             pred_file = pathjoin(model_dir,pred_file)
