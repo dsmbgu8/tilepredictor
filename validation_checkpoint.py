@@ -6,14 +6,16 @@ from pylib import *
 
 from tilepredictor_util import *
 
-from keras.callbacks import Callback
-
-class ValidationCheckpoint(Callback):
-    def __init__(self,val_monitor='val_loss',model_dir=None, mode='auto',
-                 test_period=1,save_period=None,
-                 initial_epoch=0,warmup_epoch=5,max_vanish=5,
+def keras_callback():
+    from keras.callbacks import Callback
+    return Callback
+    
+class ValidationCheckpoint(keras_callback()):
+    def __init__(self,val_monitor='val_loss',model_dir=None,mode='auto',
+                 test_ids=[],test_period=1,save_period=None,initial_epoch=0,
+                 initial_monitor=None,warmup_epoch=5,max_vanish=5,
                  save_best_model=True,save_best_preds=True,
-                 initial_monitor=None,pid=None,verbose=0):
+                 pid=None,verbose=0):
         super(ValidationCheckpoint, self).__init__()
         
         self.metrics      = {}
@@ -21,8 +23,9 @@ class ValidationCheckpoint(Callback):
         self.pid          = pid or os.getpid()
         self.test_data    = []
         self.test_labs    = []
-        self.test_ids     = []
-
+        self.test_ids     = test_ids
+        self.y_test       = []
+        
         self.pred_outs    = []
         self.pred_labs    = []
         self.pred_prob    = []
@@ -53,10 +56,10 @@ class ValidationCheckpoint(Callback):
         self.max_vanish   = max_vanish
         self.epoch_vanish = 0
         
-
         self.out_suffix   = 'iter{epoch:d}_%s{%s:.6f}'%(self.val_monitor,
                                                         self.val_monitor)
         self.out_suffix   = self.out_suffix + '_pid%d'%self.pid
+        self.best_suffix  = 'best_pid%d'%self.pid
         self.save_preds   = save_best_preds
         self.save_model   = save_best_model
         self.verbose      = verbose
@@ -71,6 +74,10 @@ class ValidationCheckpoint(Callback):
             # save output files for (e.g.,) "val_loss" monitor as "loss"
             self.preds_iterf = pathjoin(model_dir,'preds_'+self.out_suffix+'.txt')
             self.model_iterf = pathjoin(model_dir,'model_'+self.out_suffix+'.h5')        
+
+            # keep symlink to best model+preds
+            self.preds_bestf = pathjoin(model_dir,'preds_'+self.best_suffix+'.txt')
+            self.model_bestf = pathjoin(model_dir,'model_'+self.best_suffix+'.h5')        
 
             # only save latest set of mispredictions
             self.mispred_dataf = pathjoin(model_dir,'mispreds_pid%d.h5'%self.pid)        
@@ -104,10 +111,17 @@ class ValidationCheckpoint(Callback):
             print(msg)
 
         return new_best
-            
+
+    def update_data(self,validation_data,validation_labs,verbose=1):
+        self.test_data = validation_data
+        self.y_test = validation_labs
+        if verbose:
+            print('Updated validation checkpoint with '
+                  '%d new test samples'%len(self.test_data))
+
     def update_ids(self,test_ids,verbose=1):
         """
-        update_data(self,test_data,test_labs,test_ids)
+        update_ids(self,test_ids)
         
         Summary: updates test data for model validation,
                  including test_ids for prediction file
@@ -193,7 +207,10 @@ class ValidationCheckpoint(Callback):
         etime = self.epoch_end_time-self.epoch_start_time
         state_msg = 'Epoch %05d: %.3f seconds processing time'%(epoch+1,etime)
         logs['cputime'] = etime
-        if self.validation_data and (epoch % self.test_period) == 0:
+        n_data = len(self.test_data)
+        if not self.validation_data and n_data==0:
+            warn('no validation data for validation checkpoint!')
+        elif (epoch % self.test_period) == 0:
             n_labs = len(self.test_labs)
             n_ids = len(self.test_ids)
             if n_labs==0:
@@ -201,19 +218,28 @@ class ValidationCheckpoint(Callback):
                 # for Xi,yi in self.validation_data:
                 #     self.test_labs.append(np.argmax(yi))
                 #     self.test_data.append(Xi)
-                self.y_test = self.validation_data[1]
+                if len(self.y_test)==0:
+                    if self.validation_data:
+                        self.y_test = self.validation_data[1]
+                    else:
+                        warn('no validation labs for validation checkpoint!')
+                        return
+                
                 self.test_labs = to_binary(self.y_test)
-            elif n_ids!=0 and (self.y_test != self.validation_data[1]).any():
+                n_labs = len(self.test_labs)
+            elif n_ids!=0 and self.validation_data and \
+                 (self.y_test != self.validation_data[1]).any():
                 print('\nValidation data changed between current and previous '
                       'epoch, test_ids no longer valid!')
                 self.test_ids = np.arange(n_labs)
                 n_ids = n_labs
 
             if n_ids==0:
-                self.test_ids = np.arange(len(self.test_labs))
+                self.test_ids = np.arange(n_labs)
 
             test_ids  = self.test_ids
-            test_data = self.validation_data[0]
+            test_data = self.test_data if len(self.test_data)==n_labs else \
+                        self.validation_data[0]
             test_labs = self.test_labs
             pred_dict = compute_predictions(self.model,test_data)
             self.pred_labs = pred_dict['pred_labs']
@@ -248,19 +274,21 @@ class ValidationCheckpoint(Callback):
             state_msg += '\nValidation '+(', '.join(mstr))
 
             val_epoch = np.float32(logs[self.val_monitor])
+            fmtdict = {'epoch':epoch,self.val_monitor:val_epoch}                    
 
             new_best = self.update_monitor(epoch,val_epoch,verbose=0)
-            if epoch < self.warmup:
+            if epoch==0 or epoch < self.warmup:
                 state_msg += '\nEpoch %d < warmup steps (=%d), no outputs written.'%(epoch,self.warmup)
             elif 'val_fscore' in logs and logs['val_fscore']==0:
                 state_msg += '\nIgnoring val_fscore=0.0, no outputs written.'            
             elif new_best:
                 # new best score, update best and report status
                 state_msg += '\nNew best %s=%.6f'%(self.val_monitor,self.val_best)
-                fmtdict = {'epoch':epoch,self.val_monitor:self.val_best}
+
                 if self.save_model:
                     modelf = self.model_iterf.format(**fmtdict)
                     self.model.save(modelf)
+                    update_symlink(modelf,self.model_bestf)
                     state_msg += '\nSaved best model to %s'%modelf
 
                 if self.save_preds:
@@ -268,12 +296,12 @@ class ValidationCheckpoint(Callback):
                     write_predictions(predsf, test_ids, test_labs,
                                       self.pred_labs, self.pred_prob,
                                       pred_metrics, fnratfpr=0.01)
+                    update_symlink(predsf,self.preds_bestf)
                     state_msg += '\nSaved best predictions to %s'%predsf
 
-            elif self.save_period and (epoch % self.save_period)==0:
+            elif self.save_period and ((epoch+1)%self.save_period)==0:
                 # periodic save
-                state_msg += '\nPeriodic save triggered, %s=%.6f'%(self.val_monitor,val_epoch)
-                fmtdict = {'epoch':epoch,self.val_monitor:val_epoch}
+                state_msg += '\nPeriodic save triggered, %s=%.6f'%(self.val_monitor,val_epoch)                
                 if self.save_model:
                     modelf = self.model_iterf.format(**fmtdict)
                     self.model.save(modelf)
