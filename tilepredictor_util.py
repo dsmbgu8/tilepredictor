@@ -7,7 +7,7 @@ from warnings import warn
 
 import numpy as np
 
-from os.path import abspath, expanduser, splitext
+from os.path import abspath, expanduser, splitext, islink
 from os.path import join as pathjoin, split as pathsplit, exists as pathexists 
 
 tilepredictor_home = pathsplit(__file__)[0]
@@ -38,6 +38,14 @@ metrics_sort = ['precision','recall','fscore']
 
 ORDER_NEAREST = 0
 ORDER_LINEAR  = 1
+
+def update_symlink(source_path,link_name):
+    # create symlink from link_name to source,
+    # replace old link if existing
+    source_abs, link_abs = abspath(source_path),abspath(link_name)
+    if islink(link_abs):
+        os.unlink(link_abs)
+    os.symlink(source_abs,link_abs)
 
 def load_json(jsonf):
     with open(jsonf,'r') as fid:
@@ -334,11 +342,13 @@ def compute_predictions(model,X_test):
     pred_prob = np.amax(pred_outs,axis=-1)
     return dict(pred_outs=pred_outs,pred_labs=pred_labs,pred_prob=pred_prob)
 
-def compute_metrics(test_lab,pred_lab,pos_label=1,average='binary'):
+def compute_metrics(test_lab,pred_lab,pos_label=1,average='binary',asdict=True):
     from sklearn.metrics import precision_recall_fscore_support as _prfs
     assert((test_lab.ndim==1) and (pred_lab.ndim==1))
-    prfs = _prfs(test_lab,pred_lab,average=average,pos_label=pos_label)
-    return dict(zip(['precision','recall','fscore'],prfs[:-1]))
+    prf = _prfs(test_lab,pred_lab,average=average,pos_label=pos_label)[:-1]
+    if asdict:
+        prf = dict(zip(['precision','recall','fscore'],prf))
+    return prf
 
 def fnrfpr(test_lab,prob_pos,fnratfpr=None,verbose=0):
     assert((test_lab.ndim==1) and (prob_pos.ndim==1))
@@ -825,7 +835,7 @@ def fill_batch(X_batch,y_batch,batch_size,balance=True):
         if len(bal_idx)!=0:
             aug_idx = np.r_[aug_idx[bal_idx],aug_idx]
     aug_idx = aug_idx[randperm(len(aug_idx),n_aug)]
-    return X_batch[aug_idx], y_batch[aug_idx]
+    return aug_idx #X_batch[aug_idx], y_batch[aug_idx]
 
 class threadsafe_iter:
     """
@@ -834,7 +844,6 @@ class threadsafe_iter:
     code via parag2489: https://github.com/fchollet/keras/issues/1638 
     """
     def __init__(self, it):
-        
         self.it = it
         self.lock = threading.Lock()
 
@@ -899,13 +908,36 @@ def imaugment_perturb(*args,**kwargs):
     return _pb(*args,**kwargs)
 
 @threadsafe_generator
-def array2gen(a,nb):
+def array2gen(a,ngen):
     assert(a.ndim==4)
     outshape = [-1]+list(a.shape[1:])
-    for i in range(0,a.shape[0]+1,nb):
-        yield a[i*nb:min((i+1)*nb,a.shape[0])].reshape(outshape)
+    for i in range(0,a.shape[0]+1,ngen):
+        yield a[i*ngen:min((i+1)*ngen,a.shape[0])].reshape(outshape)
+
+
+        
+@threadsafe_generator
+def image2tiles(I,tdim,ngen,keepmask=[],skipmask=[]):
+    assert(I.ndim==3)
+    maxi,maxj = I.shape[0]-tdim+1,I.shape[1]-tdim+1
+    ti = np.zeros([ngen,tdim,tdim,I.shape[2]])
+    for ij in range(maxi*maxj):
+        idx = ij%ngen
+        i = ij//maxj
+        j = ij-(i*maxj)
+        ti[idx,:,:,:] = I[i:i+tdim,j:j+tdim,:]        
+        if ((ij+1)%ngen) == 0:
+            yield ti
+
+
         
 if __name__ == '__main__':
+
+    I = np.random.randn(10,15,4)
+    print(I.shape)
+    for ti in image2tiles(I,4,5):
+        print(ti)
+        raw_input()
     # Binary values:      [0,1,1]
     # Categorical values: 0 -> [ 1.  0.] (argmax=0)
     #                     1 -> [ 0.  1.] (argmax=1)
@@ -922,3 +954,5 @@ if __name__ == '__main__':
     print("Binary 0 -> categorical %s (argmax=%d)"%(neg_cat,np.argmax(neg_cat)))
     print("       1 -> categorical %s (argmax=%d)"%(pos_cat,np.argmax(pos_cat)))
    
+
+    
