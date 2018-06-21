@@ -42,4 +42,4 @@ def model_init(input_shape,**kwargs):
                 
             layer.trainable = trainable
         
-    return dict(model=base_model,lr_mult=0.25)
+    return dict(model=base_model,lr_mult=0.5)
