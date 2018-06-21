@@ -14,7 +14,7 @@ from LatLongUTMconversion import UTMtoLL
 
 from extract_patches_2d import *
 
-default_load_func = 'tilepredictor_util.imread_image'
+default_load_func = 'tilepredictor_util.imread_rgb'
 
 batch_size = 32
 n_epochs = 2000
@@ -702,7 +702,7 @@ if __name__ == '__main__':
 
     mean_image = mean_file
     if mean_file:
-        mean_image = imread_image(mean_file)
+        mean_image = imread_rgb(mean_file)
 
     if load_best:
         model_meta,model_weightf = find_saved_models(state_dir,model_package,
@@ -842,7 +842,7 @@ if __name__ == '__main__':
                 print('Output "%s" exists, skipping'%img_csvf)
                 continue
 
-            img_data = imread_image(imagef,bands=4)
+            img_data = imread_rgb(imagef)
             print('img_data info: "%s"'%str((img_data.shape,img_data.dtype,
                                              extrema(img_data.ravel()))))
             

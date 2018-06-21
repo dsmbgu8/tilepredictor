@@ -467,7 +467,7 @@ def imresize(img,output_shape,**kwargs):
     kwargs.setdefault('preserve_range',True)
     return _imresize(img,output_shape,**kwargs)
 
-def imread_image(f,bands=3,dtype=np.uint8,plugin=None,verbose=0):
+def imread_rgb(f,dtype=np.uint8,plugin=None,verbose=0):
     from skimage.io import imread
     # plugin='imageio'
     img = imread(f,plugin=plugin)
@@ -477,9 +477,11 @@ def imread_image(f,bands=3,dtype=np.uint8,plugin=None,verbose=0):
 
     itype = img.dtype
     ishape = img.shape
-    if img.ndim==3 and img.shape[2]==4 and bands!=4:
-        img = img[:,:,:3]
-    assert(img.shape[2]==bands)
+    if img.ndim==3:
+        if img.shape[2]==4:
+            img = img[:,:,:3]
+            
+    assert(img.shape[2] == 3)
     scalef=255 if itype==float else 1
     imgout = dtype(scalef*img)
     if verbose:
@@ -696,7 +698,7 @@ def get_lab_mask(imgid,lab_path,lab_pattern,verbose=False):
 
     try:
         if labf.endswith('.png'):
-            labimg = imread_image(labf,bands=4,dtype=np.uint8,verbose=0)
+            labimg = imread_rgb(labf,dtype=np.uint8,verbose=0)
         else:    
             labimg = openimg(labf).load().squeeze()
     except:
