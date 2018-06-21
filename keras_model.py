@@ -1,4 +1,14 @@
+import sys
 import numpy as np
+
+_print_version=False
+if _print_version:
+    print_version()
+    
+def print_version():
+    import keras
+    print('using keras.__version__',keras.__version__)
+    raw_input()
 
 def load_model(modelf,**kwargs):
     from keras.models import _clone_sequential_model, Sequential, \
@@ -40,6 +50,8 @@ def update_base_outputs(model_base,output_shape,optparam,hidden_type='fc'):
     
     if hidden_type=='fc':
         hidden_layer = Dense(n_hidden, activation='relu')
+    elif hidden_type=='none':
+        hidden_layer = None
     else:
         print('Unknown hidden_type "%s", using "fc"'%hidden_type)
         hidden_layer = Dense(n_hidden, activation='relu')
@@ -50,18 +62,22 @@ def update_base_outputs(model_base,output_shape,optparam,hidden_type='fc'):
     if mclass == 'Sequential':
         print("Using Sequential model")
         model = model_base
-        model.add(hidden_layer)
+        if hidden_layer:
+            model.add(hidden_layer)
         model.add(output_layer) 
     else:
         print("Using functional API")
-        #model = Model(inputs=model_base.inputs, outputs=model_base.outputs)
-        #model = hidden_layer(model)
-        #model = output_layer(model)
-
-        model = Sequential()
-        model.add(model_base)        
-        model.add(hidden_layer)
-        model.add(output_layer)        
+        inputs = model_base.layers[0].get_input_at(0)
+        outputs = model_base.layers[-1].get_output_at(0)
+        if hidden_layer:
+            outputs = hidden_layer(outputs) 
+        preds = output_layer(outputs)
+        model = Model(inputs=inputs, outputs=preds)
+        #model = Sequential()
+        #model.add(model_base)        
+        #if hidden_layer:
+        #    model.add(hidden_layer)
+        #model.add(output_layer)        
 
     model.n_base_layers = len(model_base.layers)
     model.n_top_layers = len(model.layers)-model.n_base_layers
@@ -70,10 +86,12 @@ def update_base_outputs(model_base,output_shape,optparam,hidden_type='fc'):
 
 def model_transform(X,model,layer=0):
     from keras.backend import backend as _backend
+    input_layer = model.layers[0]
     layer = model.layers[l]
-    func = _backend.function([layer.get_input_at(0),_backend.learning_phase()],
+    func = _backend.function([input_layer.get_input_at(0),
+                              _backend.learning_phase()],
                              [layer.get_output_at(0)])
-    return func([X])[0]
+    return func([X,0])[0]
 
 def model_init(model_base, model_flavor, state_dir, optparam, **params):
     #from keras.optimizers import Adam as Optimizer
@@ -98,9 +116,30 @@ def model_init(model_base, model_flavor, state_dir, optparam, **params):
                        epsilon=optparam['tol'])
     params.setdefault('loss','categorical_crossentropy')
     params['optimizer'] = Optimizer(**optparams)
+    params['optimizer_class'] = Optimizer
+    params['optimizer_config'] = optparams
     
     print('Initialzing model functions')
     model_backend = _backend.backend()
+
+    if model_backend == 'tensorflow':        
+        import tensorflow as tf
+        from keras.backend.tensorflow_backend import get_session,set_session
+        try:
+            session = get_session()
+            session._config.gpu_options.allow_growth = True
+            set_session(session)
+        except Exception as err: 
+            print(sys.exc_info())
+
+        try:
+            run_opts = tf.RunOptions()
+            run_opts.report_tensor_allocations_upon_oom=True
+            params['options'] = run_opts            	
+        except Exception as err: 
+            print(sys.exc_info(),err)
+
+    
     model_xform = lambda X,l=0: model_transform(X,model_base,l)
     model_pred  = lambda X,batch_size=32: model_base.predict(X,verbose=verbose,
                                                              batch_size=batch_size)
