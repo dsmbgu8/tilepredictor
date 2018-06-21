@@ -48,6 +48,7 @@ def model_init(input_shape,**kwargs):
     model.add(MaxPooling2D(pool_size=(2,2)))    
     model.add(SpatialDropout2D(0.3))    
 
+    # note: flattening usually outperforms globavgpool, but can be costly
     model.add(Flatten())
     #model.add(GlobalAveragePooling2D())
     model.add(Dense(2048))
