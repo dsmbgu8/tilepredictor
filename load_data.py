@@ -1,16 +1,41 @@
 #!/usr/bin/env python
-from __future__ import division, print_function, absolute_import, unicode_literals
+from __future__ import division, print_function, absolute_import
 
 from os.path import exists as pathexists, expanduser
 
 import numpy as np
-from .collections import ImageCollection
 
+from imagecollection import ImageCollection
 from tilepredictor_util import *
 from pylib import *
 
+
 require_load_func=True
 
+def import_load_func(func_path):
+    import importlib
+
+    module_path,module_func = pathsplit(func_path)
+    path_msg = ''
+    if module_path != '':
+        if pathexists(module_path):            
+            path_msg = 'from path '+module_path
+            sys.path.append(module_path)
+        else:
+            warn('specified module_path "%s" does not exist'%module_path)
+        
+    print('Importing load_func: ',module_func,path_msg)
+    module,func = module_func.split('.')
+    func_lib = importlib.import_module(module)
+    load_func = getattr(func_lib, func)
+    return load_func
+
+def imgfiles2collection(imgfiles,load_func,conserve_memory=True,**kwargs):
+    return ImageCollection(imgfiles,load_func=load_func,
+                           conserve_memory=True,**kwargs)
+
+def imgfiles2array(imgfiles,load_func,**kwargs):
+    return imgfiles2collection(imgfiles,load_func,**kwargs).concatenate()
 
 def _parse_label_file(labelf,nmax=np.inf):
     imglabs = np.loadtxt(labelf,dtype=str)
@@ -110,8 +135,8 @@ def load_image_data(train_file,test_file,**kwargs):
     exclude_pattern = kwargs.pop('exclude_pattern',None)
     mean_image = kwargs.pop('mean_image',None)
     class_mode = kwargs.pop('class_mode','categorical')
-    conserve_mem = kwargs.pop('conserve_memory',True)
-    collect_test = kwargs.pop('collect_test',True)
+    conserve_mem = kwargs.pop('conserve_memory',False)
+    collect_test = kwargs.pop('collect_test',(not conserve_mem))
     save_test = kwargs.pop('save_test',False)
         
     if train_file==test_file:
@@ -243,6 +268,16 @@ if __name__ == '__main__':
     import sys    
     import pylab as pl
 
+    load_func = import_load_func('plot_tiles.loadcrop3')
+    train_file = 'iip_tiles_v1/tiles/tile_labels_fold1of3_train.txt'
+    test_file = 'iip_tiles_v1/tiles/tile_labels_fold1of3_test.txt'
+    loadargs = (train_file,test_file)
+    loadkwargs = {'conserve_memory':True,'load_func':load_func,
+                  'exclude_pattern':None} # 'exclude_pattern':'/tn/'}
+
+    train_data,test_data = load_image_data(*loadargs,**loadkwargs)
+    print(test_data),raw_input()
+    
     tile_dim = 150
     n_tiles = 50
     imageccomp2tilegen('',tile_dim,n_tiles,conserve_memory=True)
