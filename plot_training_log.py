@@ -1,18 +1,35 @@
 #!/usr/bin/env python
-
+# -*- coding: utf-8 -*-
+"""
+Docstring for plot_training_log.py
+Docstrings: http://www.python.org/dev/peps/pep-0257/
+"""
 from __future__ import absolute_import, division, print_function
+from warnings import warn
 
 import sys,os
 import csv
 from pylib import *
-from pandas import DataFrame
+from pandas import Series,DataFrame,PeriodIndex
 
 if __name__ == '__main__':
-    if len(sys.argv)==1:
-        print('usage: %s training_log.csv'%sys.argv[0])
-        sys.exit(0)
+    import argparse
+    parser = argparse.ArgumentParser()
 
-    csvfile = sys.argv[1]
+    # keyword arguments 
+    parser.add_argument('-v', '--verbose', action='store_true', 
+    			help='Enable verbose outfile')
+
+    parser.add_argument('--step', type=int, 
+    			help='Enable stepwise output')    
+
+    # positional arguments 
+    parser.add_argument('csvfile', help='Csvfile', type=str, metavar='CSVFILE') 
+
+    args = parser.parse_args()
+
+    verbose = args.verbose
+    csvfile = args.csvfile
 
     reader = csv.reader(open(csvfile, 'rU')) #, dialect=csv.excel_tab)
     trhdr  = reader.next()
@@ -21,6 +38,7 @@ if __name__ == '__main__':
     lr_col = 'clr_lr' if 'clr_lr' in trhdr else 'lr'
 
     epoch = trhist['epoch']
+    nepochs = int(epoch.max())
     loss=trhist['loss']
     vloss=trhist['val_loss']
     vpre=trhist['val_precision']
@@ -93,6 +111,23 @@ if __name__ == '__main__':
         ax[j].axvline(il,c='b',ls=':')        
     pl.suptitle(msg)
 
+    if args.step is not None:
+        step = args.step
+        s_index = pd.date_range('1/1/2000', periods=len(vfs), freq='T')
+        s_ids = ['loss','val_loss','val_fscore','val_precision','val_recall']
+        s_series = [loss,vloss,vfs,vpre,vrec]
+        print('epochs:',nepochs)
+        steps = range(0,nepochs,step)
+        print('steps:',steps)
+        for j in range(nsub):
+            for s in steps:
+                ax[j].axvline(s,c='gray',ls='--',lw=0.5,alpha=0.8)
+                
+        for s_id,s_vals in zip(s_ids,s_series):
+            s_rs = Series(s_vals.values,index=s_index).resample('%dT'%step)
+            print(s_id,':',s_rs.apply(['min','median','max']).values)
+
+    
     do_show=False
     if do_show:
         pl.show()
