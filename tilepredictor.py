@@ -156,9 +156,10 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
     # save float32 envi images before converting to RGBA pngs 
     if output_dir is not None:
         pexptime = gettime()
-        save_envi_output('prob',np.float32(img_prob),mapinfo)
-        save_envi_output('vcon',np.float32(img_vcon),mapinfo)
-        save_envi_output('pcon',np.float32(img_pcon),mapinfo)
+        if mapinfo:
+            save_envi_output('prob',np.float32(img_prob),mapinfo)
+            save_envi_output('vcon',np.float32(img_vcon),mapinfo)
+            save_envi_output('pcon',np.float32(img_pcon),mapinfo)
         img_vote = array2rgba(img_vote,  vmin=-max_vote,vmax=max_vote)
         img_class = array2rgba(img_class) #,vmin=-1.0,vmax=1.0)
         img_prob = array2rgba(img_prob) #,  vmin=-1.0,vmax=1.0)
@@ -186,7 +187,7 @@ def write_csv(csvf,imgid,pred_list,tile_dim,prob_thresh=0.0,img_map=None):
     pred_keep = pred_list[keep_mask,:]
     # offset line,samp by tile center
     line,samp = (tile_dim//2)+np.float32(pred_keep[:,[1,2]]).T
-    probpos = pred_keep[:,-1]       
+    probpos = pred_keep[:,-1]     
     if img_map:        
         zone,hemi = img_map['zone'],img_map['hemi']
         zonealpha = zone + ('N' if hemi=='North' else 'M')
@@ -214,8 +215,9 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
                    lab_mask=[], verbose=0, transpose=False, print_status=True,
                    do_show=False):
     from skimage.util.shape import view_as_windows
-        
+
     input_shape = model.layers[0].input_shape
+
     if backend=='tensorflow':
         # channels last
         tile_dim,tile_bands = input_shape[2],input_shape[3]
@@ -234,6 +236,7 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     stride = int(stride)
     
     img_test = (img_data.transpose((1,0,2)) if transpose else img_data).copy()
+    img_dtype = img_data.dtype
     rows,cols,bands = img_test.shape
 
     # pad to fit into (modulo stride) and (modulo tile_dim) increments
@@ -244,14 +247,14 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     radd += tile_dim-(rows+radd)%tile_dim
     
     if cadd > 0:
-        csbuf = np.zeros([rows,tile_dim,bands])
-        cebuf = np.zeros([rows,cadd,bands])
+        csbuf = np.zeros([rows,tile_dim,bands],dtype=img_dtype)
+        cebuf = np.zeros([rows,cadd,bands],dtype=img_dtype)
         img_test = np.hstack([csbuf,img_test,cebuf])
         cols += tile_dim+cadd
         
     if radd > 0:
-        rsbuf = np.zeros([tile_dim,cols,bands])
-        rebuf = np.zeros([radd,cols,bands])
+        rsbuf = np.zeros([tile_dim,cols,bands],dtype=img_dtype)
+        rebuf = np.zeros([radd,cols,bands],dtype=img_dtype)
         img_test = np.vstack([rsbuf,img_test,rebuf])
         rows += tile_dim+radd
 
@@ -524,7 +527,8 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
                     img_mask=img_mask,
                     pred_list=pred_list)
 
-    if output_dir:        
+    if output_dir:
+        print('img_map: "%s"'%str((img_map)))
         plot_pred_images(img_rgb,pred_out,mapinfo=img_map,lab_mask=lab_mask,
                          output_dir=output_dir,output_prefix=output_prefix,
                          do_show=do_show)
@@ -551,8 +555,7 @@ if __name__ == '__main__':
                         help="Path to save output images/metadata (default=state_dir)")
 
     parser.add_argument("--load_func", help="Image loader function (default=%s)"%default_load_func,
-                        type=str,default=default_load_func)
-    
+                        type=str,default=default_load_func)    
     
     parser.add_argument("-w", "--weight_file", type=str,
                         help="Weight file to write or load")
@@ -718,6 +721,7 @@ if __name__ == '__main__':
                           model_weightf=model_weightf,
                           num_gpus=num_gpus)
 
+    print('module_func: "%s"'%str((module_func)))
     load_func = load_data.import_load_func(module_func)
     def preprocess_tile(img,model=model,doplot=False,verbose=0):
         pre = model.preprocess(img,transpose=True,verbose=verbose)
@@ -842,7 +846,7 @@ if __name__ == '__main__':
                 print('Output "%s" exists, skipping'%img_csvf)
                 continue
 
-            img_data = imread_rgb(imagef)
+            img_data = load_func(imagef)
             print('img_data info: "%s"'%str((img_data.shape,img_data.dtype,
                                              extrema(img_data.ravel()))))
             
@@ -871,7 +875,11 @@ if __name__ == '__main__':
                     aximshow(ax,img_over,img_id+'+labels')
                     pl.show()
 
-            salience_out = image_salience(model,img_data,tile_stride,
+            print('img_data.shape: "%s"'%str((img_data.shape)),
+                  'img_data.dtype: "%s"'%str((img_data.dtype)))
+            print('output_dir: "%s"'%str((output_dir)))
+            print('img_output_prefix: "%s"'%str((img_output_prefix)))
+            salience_out = image_salience(model.base,img_data,tile_stride,
                                           output_dir,
                                           img_output_prefix,
                                           preprocess=model.preprocess,
