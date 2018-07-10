@@ -1,3 +1,5 @@
+from __future__ import absolute_import, division, print_function
+
 import sys
 import numpy as np
 
@@ -93,14 +95,7 @@ def model_transform(X,model,layer=0):
                              [layer.get_output_at(0)])
     return func([X,0])[0]
 
-def model_init(model_base, model_flavor, state_dir, optparam, **params):
-    #from keras.optimizers import Adam as Optimizer
-    #optparams   = dict(lr=optparam['lr_min'],
-    #                   beta_1=optparam['beta_1'],
-    #                   beta_2=optparam['beta_2'],
-    #                   decay=optparam['weight_decay'],
-    #                   epsilon=optparam['tol'])    
-    from keras.optimizers import Nadam as Optimizer
+def model_init(model_base, model_flavor, state_dir, optparam, **params):    
     from keras import backend as _backend
     from keras.models import load_model
 
@@ -109,35 +104,54 @@ def model_init(model_base, model_flavor, state_dir, optparam, **params):
 
     print('Initialzing optimizer')
     lr_mult = params.pop('lr_mult',1.0)
-    optparams   = dict(lr=optparam['lr_min'],
-                       beta_1=optparam['beta_1'],
-                       beta_2=optparam['beta_2'],
-                       schedule_decay=optparam['weight_decay'],
-                       epsilon=optparam['tol'])
+    optclass = optparam.get('optclass','Nadam')
+    print('Using',optclass,'optimizer')
+    optimparams = dict(lr=optparam['lr_min'])
+    optkeys = []
+    if optclass=='Nadam':
+        from keras.optimizers import Nadam as Optimizer
+        optkeys = ['beta_1','beta_2']
+        optimparams['schedule_decay']=optparam['weight_decay']
+        optimparams['epsilon']=optparam['tol']
+    elif optclass=='AdamW':
+        from AdamW import AdamW as Optimizer
+        optkeys = ['beta_1','beta_2','weight_decay','decay']
+        optimparams['epsilon']=optparam['tol']        
+    elif optclass=='SGD':
+        from keras.optimizers import SGD as Optimizer
+        optkeys = ['momentum', 'weight_decay','decay','nesterov']        
+    elif optclass=='SGDW':
+        from SGDW import SGDW as Optimizer
+        optkeys = ['momentum', 'weight_decay','decay','nesterov']
+        
+    for key in optkeys:
+        optimparams[key] = optparam[key]
+        
     params.setdefault('loss','categorical_crossentropy')
-    params['optimizer'] = Optimizer(**optparams)
+    params['optimizer'] = Optimizer(**optimparams)
     params['optimizer_class'] = Optimizer
-    params['optimizer_config'] = optparams
+    params['optimizer_config'] = optimparams
     
     print('Initialzing model functions')
     model_backend = _backend.backend()
 
     if model_backend == 'tensorflow':        
         import tensorflow as tf
-        from keras.backend.tensorflow_backend import get_session,set_session
-        try:
-            session = get_session()
-            session._config.gpu_options.allow_growth = True
-            set_session(session)
-        except Exception as err: 
-            print(sys.exc_info())
+        if 0:
+            from keras.backend.tensorflow_backend import get_session,set_session
+            try:
+                session = get_session()
+                session._config.gpu_options.allow_growth = True
+                set_session(session)
+            except Exception as err: 
+                print(sys.exc_info())
 
-        try:
-            run_opts = tf.RunOptions()
-            run_opts.report_tensor_allocations_upon_oom=True
-            params['options'] = run_opts            	
-        except Exception as err: 
-            print(sys.exc_info(),err)
+            try:
+                run_opts = tf.RunOptions()
+                run_opts.report_tensor_allocations_upon_oom=True
+                params['options'] = run_opts            	
+            except Exception as err: 
+                print(sys.exc_info(),err)
 
     
     model_xform = lambda X,l=0: model_transform(X,model_base,l)

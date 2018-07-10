@@ -13,6 +13,7 @@ pyext=expanduser('~/Research/src/python/external')
 #sys.path.insert(0,pathjoin(pyext,'keras-multiprocess-image-data-generator'))
 sys.path.insert(0,pathjoin(pyext,'CLR')) # cyclic learning rate callback
 sys.path.insert(0,pathjoin(pyext,'imgaug')) # image augmentation
+sys.path.insert(0,pathjoin(pyext,'AdamW-and-SGDW')) # proper weight decay
 
 from tilepredictor_util import *
 
@@ -51,17 +52,23 @@ queue_size = 10
 
 random_state = 42
 tol = 0.00001
+momentum = 0.9
+
+optclass='Nadam' # 'SGD'
 optparams = dict(
-    weight_decay = 0.000001,
-    reduce_lr = 0.1,
-    beta_1 = 0.9,
-    beta_2 = 0.999,
     lr_min = 0.0001,
     lr_max = 0.01,
-    obj_lambda2 = 0.0025,
+    reduce_lr = 0.1,
+    momentum = momentum,
+    beta_1 = 0.9,
+    beta_2 = 0.999,
+    weight_decay = 0.000001,
+    decay = 0.0, 
+    obj_lambda2 = 0.001, # 0.0025, # l2 regularization
+    stop_delta = 0.0, #0.001
     max_norm = np.inf, # 5.0
     tol = tol,
-    stop_delta = 0.0 #0.001
+    nesterov = True
 )
 
 from imagecollection import ImageCollection
@@ -623,6 +630,7 @@ def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
     flavorp     = kwargs.pop('flavor_params',{})
     num_gpus    = kwargs.pop('num_gpus',get_num_gpus())
     val_monitor = kwargs.pop('val_monitor','val_loss')
+    optclass    = kwargs.pop('optclass','Nadam')
     
     print('Initializing new %s_%s model with parameters:'%(flavor,package))
     print('keras version: ',_keras_version)
@@ -745,8 +753,11 @@ def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
         optparams['lr_max'] = lr_max
                 
         print('Updated base optparams "%s" with lr_mult=%.3f'%(str(lr_upkeys),
-                                                                lr_mult))
-
+                                                               lr_mult))
+    # update optimizer class if necessary
+    print("Using optimizer",optclass)
+    optparams['optclass'] = optclass
+        
     model_base = build_model(model_base,input_shape,model_backend,num_gpus)
     model_params = package_lib.model_init(model_base,flavor,state_dir,
                                           optparams,**kwargs)
