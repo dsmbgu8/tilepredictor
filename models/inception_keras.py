@@ -1,6 +1,6 @@
 from warnings import warn
 _model_id = 'InceptionV3'
-MAX_BLOCK = 12 # inception max block=11
+MAX_BLOCK = 11 # inception max block=11 (mixed0,...,mixed10)
 def model_init(input_shape,**kwargs):
     from keras.applications import InceptionV3    
 
@@ -18,8 +18,8 @@ def model_init(input_shape,**kwargs):
     max_layer = kwargs.pop('max_layer',n_layers)
     max_layer = min(n_layers,max_layer) if max_layer>0 else n_layers+max_layer
     
-    
     if fix_base:
+        trainable_layers,fixed_layers = [],[]
         print('Fixing %s base_model layers'%_model_id)
         # first: train only the top layers (which were randomly initialized)
         trainable = False # fix blocks until we hit max_block
@@ -28,12 +28,19 @@ def model_init(input_shape,**kwargs):
             if not trainable and max_block < MAX_BLOCK:
                 if lname.startswith('mixed'):                    
                     spl = lname.split('_')
-                    lid = int(spl[0].replace('mixed',''))
+                    lid = int(spl[0].replace('mixed',''))+1 #+1 since 0-indexed
                     if lid>max_block:
                         trainable = True
-                        base_model.layers[i-1].trainable = trainable
-                
+                        print('All layers starting at layer %d ("%s") trainable'%(i,lname))
+            
             layer.trainable = trainable
+            if trainable:
+                trainable_layers.append((i,lname))
+            else:
+                fixed_layers.append((i,lname))
+
+        print('Trainable layers:',trainable_layers)
+        print('Fixed layers:',fixed_layers)
 
     return dict(model=base_model,lr_mult=0.1)
 
