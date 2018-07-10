@@ -1,13 +1,13 @@
 from warnings import warn
 _model_id = 'InceptionV3'
-MAX_BLOCK = 11 # inception max block=11
+MAX_BLOCK = 11 # inception max block=11 (mixed0,...,mixed10)
 def model_init(input_shape,**kwargs):
     from keras.applications import InceptionV3    
 
     assert(len(input_shape)==3 and input_shape[2]==3)
 
     verbose = kwargs.pop('verbose',1)
-    fix_base = kwargs.pop('fix_base',True)
+    fix_base = kwargs.pop('fix_base',False)
     if not fix_base:
         warn('%s model fix_base=False, training may take a long time'%_model_id)
 
@@ -28,7 +28,7 @@ def model_init(input_shape,**kwargs):
             if not trainable and max_block < MAX_BLOCK:
                 if lname.startswith('mixed'):                    
                     spl = lname.split('_')
-                    lid = int(spl[0].replace('mixed',''))
+                    lid = int(spl[0].replace('mixed',''))+1
                     if lid>max_block:
                         if verbose:
                             print('layers after max_block=%d (layer_id=%s)'
@@ -38,4 +38,4 @@ def model_init(input_shape,**kwargs):
                 
             layer.trainable = trainable
 
-    return dict(model=base_model,lr_mult=0.1)
+    return dict(model=base_model,lr_mult=0.25)

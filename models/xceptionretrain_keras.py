@@ -1,6 +1,6 @@
 from warnings import warn
 _model_id = 'Xception'
-MAX_BLOCK = 14 # xception max block=14
+MAX_BLOCK = 14 # xception max block=14 (block1,...,block14)
 def model_init(input_shape,**kwargs):
     from keras.applications import Xception
     from keras import backend
@@ -25,8 +25,10 @@ def model_init(input_shape,**kwargs):
     # pop any unwanted top layers
     for i in range(n_layers-max_layer):
         base_model.pop()
-    
+
     if fix_base:
+        trainable_layers,fixed_layers = [],[]
+        
         print('Fixing %s base_model layers'%_model_id)
         # first: train only the top layers (which were randomly initialized)
         trainable = False # fix blocks until we hit max_block
@@ -38,8 +40,15 @@ def model_init(input_shape,**kwargs):
                     lid = int(spl[0].replace('block',''))
                     if lid>max_block:
                         trainable = True
-                        base_model.layers[i-1].trainable = trainable
+                        print('All layers starting at layer %d ("%s") trainable'%(i,lname))
                 
             layer.trainable = trainable
+            if trainable:
+                trainable_layers.append((i,lname))
+            else:
+                fixed_layers.append((i,lname))
+
+        print('Trainable layers:',trainable_layers)
+        print('Fixed layers:',fixed_layers)
         
-    return dict(model=base_model,lr_mult=0.5)
+    return dict(model=base_model,lr_mult=0.25)
