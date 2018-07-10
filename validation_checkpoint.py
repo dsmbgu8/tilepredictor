@@ -299,7 +299,7 @@ class ValidationCheckpoint(keras_callback()):
                     update_symlink(predsf,self.preds_bestf)
                     state_msg += '\nSaved best predictions to %s'%predsf
 
-            elif self.save_period and ((epoch+1)%self.save_period)==0:
+            elif (self.save_period > 0) and (epoch % self.save_period)==0:
                 # periodic save
                 state_msg += '\nPeriodic save triggered, %s=%.6f'%(self.val_monitor,val_epoch)                
                 if self.save_model:
