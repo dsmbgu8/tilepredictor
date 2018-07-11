@@ -1,5 +1,5 @@
 # tilepredictor
-Wrapper for Keras/Lasagne-based Image Tile-based CNN classifiers
+Platform agnostic (keras currently supported) wrapper for image tile-based CNN classifiers
 
 ## generating salience maps using a trained classifier
 ```
