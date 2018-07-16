@@ -43,9 +43,16 @@ def update_symlink(source_path,link_name):
     # create symlink from link_name to source,
     # replace old link if existing
     source_abs, link_abs = abspath(source_path),abspath(link_name)
+    if not pathexists(source_abs):
+        warn('source \''+source_abs+'\' does not exist')
+        return
     if islink(link_abs):
+        warn('target \''+link_abs+'\' exists, unlinking')
         os.unlink(link_abs)
-    os.symlink(source_abs,link_abs)
+    try:
+        os.symlink(source_abs,link_abs)
+    except Exception as e:
+        pass
 
 def load_json(jsonf):
     with open(jsonf,'r') as fid:
@@ -56,7 +63,6 @@ def save_json(jsonf,outdict,**kwargs):
     kwargs.setdefault('sortkeys',True)
     with open(jsonf,'w') as fid:
         print(json.dumps(outdict,**kwargs),file=fid)
-
 
 def collect_tile_uls(tile_path,tile_id='det',tile_ext='.png'):
     """
@@ -328,13 +334,11 @@ def to_binary(labs):
     assert(labssq.ndim==2 and labssq.shape[1]==2)
     return np.int8(np.argmax(labssq,axis=-1))
     
-def to_categorical(labs):
+def to_categorical(labs,pos_label=1):
     # replacement for keras.utils.np_utils.to_categorical
     labssq = labs.squeeze()
-    assert(labssq.ndim==1)
-    ulabs = np.unique(labssq)
-    assert(len(ulabs)==2)
-    return np.int8(np.c_[labssq==ulabs[0],labssq==ulabs[1]])
+    assert((labssq.ndim==1) & (len(np.unique(labssq))==2))
+    return np.int8(np.c_[labssq!=pos_label,labssq==pos_label])
 
 def compute_predictions(model,X_test):
     pred_outs = model.predict(X_test)
@@ -664,10 +668,49 @@ def findhdr(img_file):
         return hdr_file
     return None
 
+def createimg(hdrf,metadata,ext='',force=True):
+    from spectral.io.envi import create_image
+    return create_image(hdrf, metadata, ext=ext, force=force)
+
 def openimg(imgf,hdrf=None,**kwargs):
     from spectral.io.envi import open as _open
     hdrf = hdrf or findhdr(imgf)
     return _open(hdrf,imgf,**kwargs)
+
+def openimgmm(img,interleave='source',writable=False):
+    if isinstance(img,str):
+        _img = openimg(img)
+        return _img.open_memmap(interleave=interleave, writable=writable)
+    return img.open_memmap(interleave=interleave, writable=writable)
+
+def array2img(outf,img,mapinfostr=None,bandnames=None,**kwargs):
+    outhdrf = outf+'.hdr'
+    if pathexists(outf) and not kwargs.pop('overwrite',False):
+        warn('unable to save array: file "%s" exists and overwrite=False'%outf)
+        return
+        
+    img = np.atleast_3d(img)
+    outmeta = dict(samples=img.shape[1], lines=img.shape[0], bands=img.shape[2],
+                   interleave='bip')
+    
+    outmeta['file type'] = 'ENVI'
+    outmeta['byte order'] = 0
+    outmeta['header offset'] = 0
+    outmeta['data type'] = envitypecode(img.dtype)
+
+    if mapinfostr:
+        outmeta['map info'] = mapinfostr
+
+    if bandnames:
+        outmeta['band names'] = '{%s}'%", ".join(bandnames)
+        
+    outmeta['data ignore value'] = -9999
+
+    outimg = createimg(outhdrf,outmeta)
+    outmm = openimgmm(outimg,writable=True)
+    outmm[:] = img
+    outmm = None # flush output to disk
+    print('saved %s array to %s'%(str(img.shape),outf))
 
 def get_lab_mask(imgid,lab_path,lab_pattern,verbose=False):
     import os
