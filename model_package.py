@@ -556,7 +556,10 @@ class Model(object):
                 # always update ids in case validation_data changed
                 validation_preds[:] = self.val_cb.collect_predictions()
             if len(validation_metrics)!=0:
-                validation_metrics[0] = self.val_cb.metrics
+                val_metrics = self.val_cb.metrics
+                if 'val_loss' not in val_metrics:
+                    val_metrics['val_loss'] = self.val_cb.val_log
+                validation_metrics[0] = val_metrics
             
         return trhist
 
@@ -631,6 +634,7 @@ def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
     num_gpus    = kwargs.pop('num_gpus',get_num_gpus())
     val_monitor = kwargs.pop('val_monitor','val_loss')
     optclass    = kwargs.pop('optclass','Nadam')
+    lr_scalef   = kwargs.pop('lr_scalef',None)
     
     print('Initializing new %s_%s model with parameters:'%(flavor,package))
     print('keras version: ',_keras_version)
@@ -713,7 +717,8 @@ def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
           'image_data_format=%s'%image_data_format())
                 
     model_params = flavor_lib.model_init(input_shape,**flavorp)
-    lr_mult = model_params.pop('lr_mult',1.0)
+    lr_mult = model_params.pop('lr_scalef',model_params.pop('lr_mult',1.0))
+    lr_scalef = lr_scalef or lr_mult
 
     if weightf:
         start_epoch, start_monitor = parse_model_meta(weightf)
@@ -739,21 +744,25 @@ def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
           'model_output_shape=%s,'%str(model_output_shape),
           'start_epoch=%d,'%start_epoch,
           'start_monitor=',start_monitor)
-    
-    if lr_mult!=1.0:
-        lr_upkeys = []
+    if lr_scalef!=1.0:
+        lr_oldkeys,lr_upkeys = [],[]
         tol = optparams['tol']
         lr_min = optparams['lr_min']
         lr_max = optparams['lr_max']
-        lr_upkeys.append('lr_max->%.2g'%lr_max)
+        lr_oldkeys.append('lr_min->%.2g'%lr_min)
+        lr_oldkeys.append('lr_max->%.2g'%lr_max)
         lr_dif = lr_max-lr_min
-        lr_max = max(lr_min,lr_max*lr_mult)
+        lr_max = max(lr_min,lr_max*lr_scalef)
         if lr_min == lr_max:
-            lr_max = lr_min+(lr_dif*lr_mult)        
+            lr_max = lr_min+(lr_dif*lr_scalef)
+
+        lr_upkeys.append('lr_min->%.2g'%lr_min)
+        lr_upkeys.append('lr_max->%.2g'%lr_max)            
         optparams['lr_max'] = lr_max
                 
-        print('Updated base optparams "%s" with lr_mult=%.3f'%(str(lr_upkeys),
-                                                               lr_mult))
+        print('Updated base optparams "%s" to "%s"'%(str(lr_oldkeys),
+                                                     str(lr_upkeys)))
+        
     # update optimizer class if necessary
     print("Using optimizer",optclass)
     optparams['optclass'] = optclass

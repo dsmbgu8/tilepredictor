@@ -6,6 +6,8 @@ from pylib import *
 
 from tilepredictor_util import *
 
+metrics_sort = ['precision','recall','fscore']
+
 def keras_callback():
     from keras.callbacks import Callback
     return Callback
@@ -18,8 +20,9 @@ class ValidationCheckpoint(keras_callback()):
                  pid=None,verbose=0):
         super(ValidationCheckpoint, self).__init__()
         
-        self.metrics      = {}
+        self.metrics      = dict([(m,[]) for m in metrics_sort])
 
+        self.val_monitor  = val_monitor
         self.pid          = pid or os.getpid()
         self.test_data    = []
         self.test_labs    = []
@@ -31,13 +34,14 @@ class ValidationCheckpoint(keras_callback()):
         self.pred_prob    = []
 
         self.state_msg    = None
-        self.val_monitor  = val_monitor
 
         if mode == 'auto':
             if any([s in val_monitor for s in ['fscore','acc']]):
                 self.val_mode = 'max'
-            else:
+            elif any([s in val_monitor for s in ['loss','error']]):
                 self.val_mode = 'min'
+            else:
+                raise Exception('Unable to determine mode for val_monitor='+val_monitor)
         else:
             self.val_mode = mode
         
@@ -47,6 +51,7 @@ class ValidationCheckpoint(keras_callback()):
         self.epoch_best   = initial_epoch if initial_monitor else 0
 
         self.val_prev     = self.val_init
+        self.val_log      = []
         self.epoch_prev   = self.epoch_best
         
         self.test_period  = test_period
@@ -262,18 +267,17 @@ class ValidationCheckpoint(keras_callback()):
                 if self.debug_epoch > 2:
                     self.debug_epoch = 0
 
-            val_loss = logs['val_loss']
-            mstr = ['loss=%9.6f'%val_loss]
+            val_epoch = np.float32(logs[self.val_monitor])
+            self.val_log.append(val_epoch)
+            mstr = ['%s=%9.6f'%(self.val_monitor,val_epoch)]
             pred_metrics = compute_metrics(test_labs,self.pred_labs)
             for m in metrics_sort:
                 val = pred_metrics[m]
                 logs['val_'+m] = val
-                self.metrics.setdefault(m,[])
                 self.metrics[m].append(val)
                 mstr.append('%s=%9.6f'%(m,val*100))
             state_msg += '\nValidation '+(', '.join(mstr))
 
-            val_epoch = np.float32(logs[self.val_monitor])
             fmtdict = {'epoch':epoch,self.val_monitor:val_epoch}                    
 
             new_best = self.update_monitor(epoch,val_epoch,verbose=0)
@@ -318,9 +322,9 @@ class ValidationCheckpoint(keras_callback()):
                 # current score doesn't beat the best, report status
                 state_msg += '\nCurrent best %s=%.6f @ epoch %d'%(self.val_monitor,self.val_best,
                                                                   self.epoch_best)
-                if self.epoch_best != 0 and val_loss==0.0:
+                if self.epoch_best != 0 and val_epoch==0.0:
                     if self.epoch_vanish == self.max_vanish:
-                        state_msg += 'Epoch %d: nonzero gradient vanished for max_vanish (=%d) consecutive epochs, terminating training'%(epoch,self.max_vanish)
+                        state_msg += 'Epoch %d: gradient vanished for max_vanish (=%d) consecutive epochs, terminating training'%(epoch,self.max_vanish)
                         self.model.stop_training = True
                     self.epoch_vanish = self.epoch_vanish + 1                    
                 else:

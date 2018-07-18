@@ -103,7 +103,6 @@ def model_init(model_base, model_flavor, state_dir, optparam, **params):
     overwrite   = params.pop('overwrite',True)
 
     print('Initialzing optimizer')
-    lr_mult = params.pop('lr_mult',1.0)
     optclass = optparam.get('optclass','Nadam')
     print('Using',optclass,'optimizer')
     optimparams = dict(lr=optparam['lr_min'])
