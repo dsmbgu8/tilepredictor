@@ -32,6 +32,7 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
                      mask_nodata=False,do_show=False):
 
     def save_png_output(imagebase,img_data):
+        from skimage.io import imsave
         outf = pathjoin(output_dir,'_'.join([output_prefix,imagebase]))+'.png'
         img_out = img_data.copy()
         img_out[...,3] = np.where(img_mask,0,255)
@@ -122,14 +123,14 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
         print('Masked pixels: %5.2f%%'%(100*pmask/float(nrows*ncols)))
         # use mask as alpha channel if img_test == rgb
         if img_test.shape[-1]==3:
-            img_test = np.dstack([img_test,float32(~img_mask)])
+            img_test = np.dstack([img_test,np.float32(~img_mask)])
         img_class[img_mask] = 0
         img_pred[img_mask] = 0
         img_prob[img_mask] = 0
         img_vcon[img_mask] = 0
         img_pcon[img_mask] = 0
         
-    max_vote = max(abs(extrema(img_vote)))    
+    max_vote = max(np.abs(list(extrema(img_vote))))
     print('Confidence image generation time: %0.3f seconds'%(gettime()-pgentime))
 
     if do_show:
@@ -173,7 +174,7 @@ def write_csv(csvf,imgid,pred_list,tile_dim,prob_thresh=0.0,img_map=None):
     header = ['imgid','row','col','prob_pos']
     assert(pred_list.shape[1]==len(header)-1)
 
-    keep_mask = float32(pred_list[:,-1])>=prob_thresh
+    keep_mask = np.float32(pred_list[:,-1])>=prob_thresh
     if (~keep_mask).all():
         warn('no detections with prediction probability >= %f'%prob_thresh)
         return
@@ -274,7 +275,7 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     crange = np.arange(0,cols-tile_dim+1,stride)
     n_rb,n_cb = len(rrange),len(crange)
     cb_den = max(1,n_cb // 1000)
-    batch_size = max(2*(n_cb//2),int(sqrt(n_cb))**2)//cb_den
+    batch_size = max(2*(n_cb//2),int(np.sqrt(n_cb))**2)//cb_den
     
     pmsg = 'Collecting predictions'
     print(pmsg+', size = %d x %d tiles (tile_dim=%d, stride=%d)'%(n_rb,
@@ -891,6 +892,3 @@ if __name__ == '__main__':
             if do_show:
                 pl.ioff();
                 pl.show()
-
-
-                

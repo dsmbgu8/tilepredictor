@@ -154,7 +154,133 @@ def bbox(points,border=0,imgshape=[]):
     cmin,cmax = max(0,minv[1]-cborder),min(imgshape[1],maxv[1]+cborder+1)    
     
     return (rmin,cmin),(rmax,cmax)
-        
+
+def rotxy(x,y,adeg,xc,yc):
+    """
+    rotxy(x,y,adeg,xc,yc)
+
+    Summary: rotate point x,y about xc,yc by adeg degrees
+
+    Arguments:
+    - x: x coord to rotate
+    - y: y coord to rotate
+    - adeg: angle of rotation in degrees
+    - xc: center x coord
+    - yc: center y coord
+
+    Output:
+    rotated x,y point
+    """
+    assert(abs(adeg) <= 360.0)
+    arad = _DEG2RAD*adeg
+    sinr = np.sin(arad)
+    cosr = np.cos(arad)
+    rotm = [[cosr,-sinr],[sinr,cosr]]
+    xp,yp = np.dot(rotm,[x-xc,y-yc])+[xc,yc]
+    return xp,yp
+
+def xy2sl(x,y,**kwargs):
+    """
+    xy2sl(x,y,x0=0,y0=,xps=0,yps=xps,rot=0,mapinfo=None) 
+
+    Given a orthocorrected image find the (s,l) values for a given (x,y)
+
+    Arguments:
+    - x,y: map coordinates
+
+    Keyword Arguments:
+    - x0,y0: upper left map coordinate (default = (0,0))
+    - xps: x map pixel size (default=None)
+    - yps: y map pixel size (default=xps)
+    - rot: map rotation in degrees (default=0)
+    - mapinfo: envi map info dict (xps,yps,rot override)
+
+    Returns:
+    - s,l: sample, line coordinates of x,y
+    """
+    mapinfo = kwargs.pop('mapinfo',{})
+
+    x0 = kwargs.pop('ulx',mapinfo.get('ulx',None))
+    y0 = kwargs.pop('uly',mapinfo.get('uly',None))
+    xps = kwargs.pop('xps',mapinfo.get('xps',None))
+    yps = kwargs.pop('yps',mapinfo.get('yps',xps))
+    rot = kwargs.pop('rot',mapinfo.get('rotation',0))
+    #if mapinfo and rot != 0:
+    #    # flip sign of mapinfo rot unless otherwise specified
+    #    rot = rot * kwargs.pop('rotsign',-1) 
+    
+    if None in (x0,y0):
+        raise ValueError("either ulx or uly defined")
+
+    if xps is None:
+        raise ValueError("pixel size defined")
+
+    yps = yps or xps
+    xp, yp = (x-x0), (y0-y)
+    if rot!=0:
+        xp, yp = rotxy(xp,yp,rot,0,0)
+
+    xp,yp = xp/xps,yp/yps
+    return xp,yp
+
+    # ar = _DEG2RAD*(rotsign*rot)
+    # cos_ar,sin_ar = cos(ar), sin(ar)
+    # rotm = [[cos_ar,-sin_ar], [sin_ar,cos_ar]]
+    # rp,p0 = dot(rotm,[[x], [y]]), dot(rotm,[[x0],[y0]])
+    # #return (rp[0,:]-p0[0])/xps, (p0[1]-rp[1,:])/xps
+    # return (rp[0]-p0[0])/xps, (p0[1]-rp[1])/xps
+
+def sl2xy(s,l,**kwargs):
+    """
+    sl2xy(s,l,x0=0,y0=0,xps=0,yps=xps,rot=0,mapinfo=None) 
+
+    Given integer pixel coordinates (s,l) convert to map coordinates (x,y)
+
+    Arguments:
+    - s,l: sample, line indices
+
+    Keyword Arguments:
+    - x0,y0: upper left map coordinate (default=(None,None))    
+    - xps: x map pixel size (default=None)
+    - yps: y map pixel size (default=xps)
+    - rot: map rotation in degrees (default=0)
+    - mapinfo: envi map info dict (entries replaced with kwargs above)    
+
+    Returns:
+    - x,y: x,y map coordinates of sample s, line l
+    """
+    mapinfo = kwargs.pop('mapinfo',{})    
+
+    x0 = kwargs.pop('ulx',mapinfo.get('ulx',None))
+    y0 = kwargs.pop('uly',mapinfo.get('uly',None))
+    xps = kwargs.pop('xps',mapinfo.get('xps',None))
+    yps = kwargs.pop('yps',mapinfo.get('yps',xps))
+    rot = kwargs.pop('rot',mapinfo.get('rotation',0))
+
+    if None in (x0,y0):
+        raise ValueError("ulx or uly undefined")
+
+    if None in (xps,yps):
+        raise ValueError("xps or yps undefined")
+
+    if yps == 0:
+        yps = xps
+
+    xp,yp = x0+xps*s, y0-yps*l
+    if rot == 0:
+        return xp,yp
+
+    X, Y = rotxy(xp,yp,rot,x0,y0)
+
+    # note: the following works with GDAL transformed xps,yps only
+    method=None
+    if method=='GDAL' and rot!=0:
+        assert(xps!=yps)
+        ar = _DEG2RAD*rot
+        X = x0 + xps * s + ar  * l
+        Y = y0 + ar  * s - yps * l    
+    return X, Y
+
 #@profile
 def collect_region_tiles(idata,iregs,regkeep,tile_dim,nmax=None,nmin=1,
                          min_pix=1,min_lab=1,verbose=0):
