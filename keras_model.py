@@ -15,8 +15,15 @@ def print_version():
 def load_model(modelf,**kwargs):
     from keras.models import _clone_sequential_model, Sequential, \
         load_model as _load_model
+    # import these since keras doesn't load them by default
+    from AdamW import AdamW
+    from SGDW import SGDW
+    custom_objects = kwargs.pop('custom_objects',{})
+    custom_objects['AdamW'] = AdamW
+    custom_objects['SGDW'] = SGDW
+    
     flatten = kwargs.pop('flatten',False)
-    model = _load_model(modelf,**kwargs)
+    model = _load_model(modelf,custom_objects=custom_objects,**kwargs)
     if flatten and model.layers[0].name.startswith('sequential_'):
         _model = _clone_sequential_model(model.layers[0])
         for layer in model.layers[1:]:
