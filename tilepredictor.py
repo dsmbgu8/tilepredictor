@@ -599,8 +599,6 @@ if __name__ == '__main__':
     # image salience params
     parser.add_argument("--image_dir", type=str,
                         help="Path to input images(s) for salience map generation")
-    parser.add_argument("--image_load_pattern", type=str, default=load_pattern,
-                        help="Load pattern for input/test images(s) (default=%s)"%load_pattern)
     
     parser.add_argument("--tile_stride", type=float, default=0.5,
                         help="Tile stride (# pixels or percentage of tile_dim) for salience map generation (default=0.5)")
@@ -631,9 +629,13 @@ if __name__ == '__main__':
     parser.add_argument("--label_load_pattern", type=str,
                         help="Load pattern to locate label image file(s) for salience map comparisons images (default=None)")
 
-    
     parser.add_argument("-v", "--verbose", action='store_true',
                         help="Enable verbose output")
+    
+    parser.add_argument("image_load_pattern", type=str, default=load_pattern,
+                        help="Load pattern for input/test images(s) (default=%s)"%load_pattern)
+    
+
     
     args = parser.parse_args(sys.argv[1:])
     model_weightf = args.weight_file
@@ -671,7 +673,8 @@ if __name__ == '__main__':
 
     # salience map generation
     img_dir       = args.image_dir 
-    img_pattern   = args.image_load_pattern 
+    img_pattern   = args.image_load_pattern
+    
     tile_dir      = args.tile_dir
     tile_stride   = args.tile_stride
     tile_bands    = args.tile_bands
