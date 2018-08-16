@@ -1,9 +1,3 @@
-# tilepredictor
-Platform agnostic (keras currently supported) wrapper for image tile-based CNN classifiers
-
-## Example: generating salience maps using a trained classifier (run_crexp.sh)
-```
-
 #!/bin/bash -v
 srcfinderroot=/lustre/bbue/ch4/srcfinder
 imagedir=${srcfinderroot}/crexp_sub_bilinear
@@ -24,7 +18,6 @@ model_file=${modeldir}/${model_flavor}_${model_package}/${model_weights}
 
 load_func=cmf2rgb_load_func.cmf2rgb_load_func_${ppmm_min}_${ppmm_max}
 load_pattern="ang*img_sub_bilinear"
-
 # set CUDA_VISIBLE_DEVICES=0 for gpu, CUDA_VISIBLE_DEVICES='' for cpu
 CUDA_VISIBLE_DEVICES=''
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} tilepredictor.py -f $model_flavor \
@@ -32,5 +25,3 @@ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} tilepredictor.py -f $model_flavor \
 		    --tile_bands $tile_bands --tile_stride $tile_stride \
 		    --image_dir $imagedir --load_func $load_func \
 		    --output_dir $outdir --image_load_pattern "$load_pattern"
-
-```
