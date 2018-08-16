@@ -1,8 +1,5 @@
 from __future__ import absolute_import, division, print_function
-import sys, os, time
-gettime = time.time
-
-from pylib import *
+import sys, os
 
 from tilepredictor_util import *
 
@@ -117,13 +114,6 @@ class ValidationCheckpoint(keras_callback()):
 
         return new_best
 
-    def update_data(self,validation_data,validation_labs,verbose=1):
-        self.test_data = validation_data
-        self.y_test = validation_labs
-        if verbose:
-            print('Updated validation checkpoint with '
-                  '%d new test samples'%len(self.test_data))
-
     def update_ids(self,test_ids,verbose=1):
         """
         update_ids(self,test_ids)
@@ -148,10 +138,21 @@ class ValidationCheckpoint(keras_callback()):
         self.test_labs = [] # invalidate test_labs to update in on_epoch_end
         if verbose:
             print('Updated validation checkpoint with '
-                  '%d new test_ids'%len(self.test_ids))
+                  '%d new test ids'%len(self.test_ids))
 
         #self.debug_batch = 0
         self.debug_epoch = 1
+    
+    def update_data(self,validation_data,validation_ids=[],verbose=1):
+        self.test_data = validation_data[0]
+        self.y_test = validation_data[1]
+        n_test = len(self.test_data)
+        if verbose:
+            print('Updated validation checkpoint with '
+                  '%d new test samples'%(n_test))
+        if len(validation_ids)!=n_test:
+            validation_ids = arraymap(str,np.arange(n_test,dtype=np.int))
+        self.update_ids(validation_ids)
 
     def collect_predictions(self):
         return self.pred_labs
@@ -236,11 +237,11 @@ class ValidationCheckpoint(keras_callback()):
                  (self.y_test != self.validation_data[1]).any():
                 print('\nValidation data changed between current and previous '
                       'epoch, test_ids no longer valid!')
-                self.test_ids = np.arange(n_labs)
+                self.test_ids = arraymap(str,np.arange(n_labs,dtype=np.int))
                 n_ids = n_labs
 
             if n_ids==0:
-                self.test_ids = np.arange(n_labs)
+                self.test_ids = arraymap(str,np.arange(n_labs,dtype=np.int))
 
             test_ids  = self.test_ids
             test_data = self.test_data if len(self.test_data)==n_labs else \

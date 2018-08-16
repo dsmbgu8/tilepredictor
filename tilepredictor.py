@@ -3,16 +3,10 @@ from __future__ import division, print_function, absolute_import
 import sys, os
 from glob import glob
 
-from pylib import *
-
 from tilepredictor_util import *
 from model_package import *
 
 from windowsequence import WindowSequence
-
-from LatLongUTMconversion import UTMtoLL
-
-from extract_patches_2d import *
 
 default_load_func = 'tilepredictor_util.imread_rgb'
 

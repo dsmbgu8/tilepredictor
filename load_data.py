@@ -7,8 +7,6 @@ import numpy as np
 
 from imagecollection import ImageCollection
 from tilepredictor_util import *
-from pylib import *
-
 
 require_load_func=True
 
