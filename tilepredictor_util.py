@@ -7,13 +7,58 @@ from warnings import warn
 
 import numpy as np
 
+from socket import gethostname as hostname
 from os.path import abspath, expanduser, splitext, islink
 from os.path import join as pathjoin, split as pathsplit, exists as pathexists 
+
+def filename(path):
+    '''
+    /path/to/file.ext -> file.ext
+    '''
+    return pathsplit(path)[1]
+
+def basename(path):
+    '''
+    /path/to/file.ext -> file
+    '''
+    return splitext(filename(path))[0]
+
+isdir      = os.path.isdir
+mkdir = os.makedirs
+mkdirs = mkdir
+
+import time
+gettime = time.time
 
 tilepredictor_home = pathsplit(__file__)[0]
 sys.path.append(abspath(tilepredictor_home))
 sys.path.append(abspath(os.getcwd()))
 
+# external imports
+pyext=expanduser('~/Research/src/python/external')
+
+# LatLongUTMconversion
+# current version: https://github.jpl.nasa.gov/bbue/srcfinder/tree/master/LatLongUTMconversion
+# original version: http://robotics.ai.uiuc.edu/~hyoon24/LatLongUTMconversion.py
+sys.path.insert(0,pathjoin(pyext,'LatLongUTMconversion'))
+
+#sys.path.insert(0,pathjoin(pyext,'keras2/build/lib'))
+#sys.path.insert(0,pathjoin(pyext,'keras204/build/lib'))
+#sys.path.insert(0,pathjoin(pyext,'keras207/build/lib'))
+#sys.path.insert(0,pathjoin(pyext,'keras208/build/lib'))
+#sys.path.insert(0,pathjoin(pyext,'keras-multiprocess-image-data-generator'))
+
+# cyclic learning rate callback (https://github.com/bckenstler/CLR)
+sys.path.insert(0,pathjoin(pyext,'CLR'))
+
+# proper Adam weight decay (https://github.com/shaoanlu/AdamW-and-SGDW)
+sys.path.insert(0,pathjoin(pyext,'AdamW-and-SGDW')) 
+
+# image augmentation (https://github.com/aleju/imgaug)
+#sys.path.insert(0,pathjoin(pyext,'imgaug')) 
+
+from LatLongUTMconversion import UTMtoLL
+from extract_patches_2d import *
 
 random_state = 42
 image_ext = '.png'
@@ -38,6 +83,14 @@ metrics_sort = ['precision','recall','fscore']
 
 ORDER_NEAREST = 0
 ORDER_LINEAR  = 1
+
+def filename2flightid(filename):
+    '''
+    get flight id from filename
+    ang20160922t184215_cmf_v1g_img -> ang20160922t184215
+    '''
+    imgid = basename(filename).split('_')[0]
+    return imgid
 
 def update_symlink(source_path,link_name):
     # create symlink from link_name to source,
@@ -64,6 +117,129 @@ def save_json(jsonf,outdict,**kwargs):
     with open(jsonf,'w') as fid:
         print(json.dumps(outdict,**kwargs),file=fid)
 
+def arraymap(func,a,axis=-1):
+    return np.apply_along_axis(func,axis,a)
+    
+def bbox(points,border=0,imgshape=[]):
+    """
+    bbox(points) 
+    computes bounding box of extrema in points array
+
+    Arguments:
+    - points: [N x 2] array of [rows, cols]
+    """
+    from numpy import atleast_2d
+    points = atleast_2d(points)
+    minv = points.min(axis=0)
+    maxv = points.max(axis=0)
+    difv = maxv-minv
+    
+    if isinstance(border,list):
+        rborder,cborder = border
+        rborder = rborder if rborder > 1 else int(rborder*difv[0])
+        cborder = cborder if cborder > 1 else int(cborder*difv[1])
+    elif border < 1:
+        rborder = cborder = int(border*difv.mean()+0.5)
+    elif border == 'mindiff':
+        rborder = cborder = min(difv)
+    elif border == 'maxdiff':
+        rborder = cborder = max(difv)
+    else:
+        rborder = cborder = border
+        
+    if len(imgshape)==0:
+        imgshape = maxv+max(rborder,cborder)+1
+    
+    rmin,rmax = max(0,minv[0]-rborder),min(imgshape[0],maxv[0]+rborder+1)
+    cmin,cmax = max(0,minv[1]-cborder),min(imgshape[1],maxv[1]+cborder+1)    
+    
+    return (rmin,cmin),(rmax,cmax)
+        
+#@profile
+def collect_region_tiles(idata,iregs,regkeep,tile_dim,nmax=None,nmin=1,
+                         min_pix=1,min_lab=1,verbose=0):
+    # idata: [n x m x l] image, first (l-1) bands = data
+    #        last band assumed to be ccomp of user labels
+    # ireg:  [n x m x 1] image of region labels 
+    #        region labels \in [min(regkeep),max(regkeep)]
+    # min_pix = minimum number or percentage of pixels in tile 
+    # min_lab = minimum number or percentage of labeled pixels in tile
+    min_pix = min_pix
+    if min_pix > 0.0 and min_pix < 1.0:
+        min_pix = max(1,int(np.ceil(min_pix*(tile_dim**2))))
+
+    ireg = iregs.squeeze()
+    Xtiles,ytiles = np.array([]),np.array([])
+    idxtiles,labtiles = np.array([]),np.array([])
+    if len(regkeep)==0:
+        return Xtiles,ytiles,idxtiles,labtiles
+    regkeep = np.unique(regkeep)
+    regmask = ireg!=0
+    ureg = np.unique(ireg[regmask])
+
+    if len(ureg)!=len(regkeep) or (ureg!=regkeep).any():
+        regmask[np.isin(ireg,regkeep)]=0
+
+    regpoints = np.c_[np.where(regmask)]
+    reglabs = ireg[regmask]
+    #print('regpoints.shape,reglabs.shape: "%s"'%str((regpoints.shape,reglabs.shape)))
+    tile_size = (tile_dim,tile_dim)
+    maskj = np.zeros(len(reglabs),dtype=np.bool8)
+    for lj in regkeep:
+        maskj[:] = reglabs==lj
+        regptsj = regpoints[maskj]
+        # get bounds of labeled region
+        (imin,jmin),(imax,jmax) = bbox(regptsj,border=tile_dim)
+        ijmin = min(imax-imin,jmax-jmin)
+        # expand mask region dims if necesary
+        if ijmin <= tile_dim:
+            ijbuf = tile_dim+(tile_dim-ijmin)+1
+            (imin,jmin),(imax,jmax) = bbox(regptsj,border=ijbuf)
+            ijmin = min(imax-imin,jmax-jmin)
+
+        if verbose:
+            print('ijmin %d, tile_dim %d'%(ijmin,tile_dim),
+                  'imin,jmin:',imin,jmin,
+                  'imax,jmax:',imax,jmax,
+                  'idata.shape:',idata.shape)
+
+        #  NOTE (BDB, 03/04/18): this may index oob if cmff not zero padded 
+        idatalj = extract_tile(idata,(imin,jmin),ijmin+1)
+
+        # pick positive tiles according to dims of label region
+        ntj = nmax if nmax else max(nmin,int(np.ceil(max(idatalj.shape[:2])/tile_dim)))
+        tilesj,idxtilesj = extract_patches_2d(idatalj, tile_size, ntj,
+                                              return_index=True)
+        pixj,pixlabsj = tilesj[...,:-1],tilesj[...,-1]
+        # keep tiles with enuough nonzero pixels
+        keepj = np.count_nonzero(pixj.reshape([pixj.shape[0],-1]),axis=-1) >= min_pix
+        pixj,pixlabsj,idxtilesj = pixj[keepj],pixlabsj[keepj],idxtilesj[keepj]
+        # TODO (BDB, 07/14/18): does the following retain all tiles containing
+        # just a single labeled pixel?
+        
+        # tiles with more than min_labj nonzero pixels = positive 
+        nlabsj = np.count_nonzero(pixlabsj.reshape([pixlabsj.shape[0],-1]),axis=-1)
+        if min_lab > 0.0 and min_lab < 1.0:
+            nlabsj[nlabsj==0]=1
+            min_labj = np.ceil(min_lab*nlabsj)
+        else:
+            min_labj = max(1,min_lab)
+
+        labsj = nlabsj >= min_labj
+
+        # append to positive output lists
+        if len(Xtiles)!=0:
+            Xtiles = np.r_[Xtiles,pixj]
+            ytiles = np.r_[ytiles,labsj]
+            idxtiles = np.r_[idxtiles,idxtilesj]
+            labtiles = np.r_[labtiles,pixlabsj]
+        else:
+            Xtiles,ytiles = pixj,labsj
+            idxtiles,labtiles = idxtilesj,pixlabsj
+        
+    return Xtiles,ytiles,idxtiles,labtiles
+
+        
 def collect_tile_uls(tile_path,tile_id='det',tile_ext='.png'):
     """
     collect_tile_files(imgid,tile_dir,tile_dim,tile_id,tile_ext=tile_ext)
@@ -391,8 +567,8 @@ def fnrfpr(test_lab,prob_pos,fnratfpr=None,verbose=0):
 
     return optfpr,optfnr,fnratfprv
 
-def write_predictions(predf, test_ids, test_lab, pred_lab, pred_prob, pred_mets,
-                      fnratfpr=None, buffered=False):
+def write_predictions(predf, test_ids, test_lab, pred_lab, pred_prob,
+                      pred_mets, fnratfpr=None, buffered=False):
     assert(len(test_ids)==len(test_lab))
     assert((pred_prob.ndim==1) and (pred_lab.ndim==1) and (test_lab.ndim==1))
     
@@ -418,10 +594,13 @@ def write_predictions(predf, test_ids, test_lab, pred_lab, pred_prob, pred_mets,
     n_fn = np.count_nonzero( m_err &  pos_lab)    
     n_acc,n_err = n_tp+n_tn, n_fp+n_fn
     n_pos,n_neg = n_tp+n_fn, n_tn+n_fp
-    outstr = ['# %d samples: # %d correct, %d errors'%(n_lab,n_acc,n_err),
-              '# [tp=%d+fn=%d]=%d positive'%(n_tp,n_fn,n_pos) + \
-              ', [tn=%d+fp=%d]=%d negative'%(n_tn,n_fp,n_neg),
-              '# %s'%mstr, '#', '# id lab pred prob']
+    outstr = [
+        '# argv=%s, pid=%d'%(' '.join(sys.argv),os.getpid()),
+        '# %d samples: # %d correct, %d errors'%(n_lab,n_acc,n_err),
+        '# [tp=%d+fn=%d]=%d positive'%(n_tp,n_fn,n_pos) + \
+        ', [tn=%d+fp=%d]=%d negative'%(n_tn,n_fp,n_neg),
+        '# %s'%mstr, '#', '# id lab pred prob'
+    ]
     
     with open(predf,'w') as fid:
         if not buffered:

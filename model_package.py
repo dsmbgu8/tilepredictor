@@ -1,19 +1,8 @@
 from __future__ import absolute_import, division, print_function
 import sys
 import time
+from glob import glob
 gettime = time.time
-
-from pylib import *
-
-pyext=expanduser('~/Research/src/python/external')
-#sys.path.insert(0,pathjoin(pyext,'keras2/build/lib'))
-#sys.path.insert(0,pathjoin(pyext,'keras204/build/lib'))
-#sys.path.insert(0,pathjoin(pyext,'keras207/build/lib'))
-#sys.path.insert(0,pathjoin(pyext,'keras208/build/lib'))
-#sys.path.insert(0,pathjoin(pyext,'keras-multiprocess-image-data-generator'))
-sys.path.insert(0,pathjoin(pyext,'CLR')) # cyclic learning rate callback
-sys.path.insert(0,pathjoin(pyext,'imgaug')) # image augmentation
-sys.path.insert(0,pathjoin(pyext,'AdamW-and-SGDW')) # proper weight decay
 
 from tilepredictor_util import *
 
@@ -507,13 +496,11 @@ class Model(object):
             self.init_callbacks(n_epochs,n_batches,**kwargs)
 
         n_test = 0 if validation_data is None else len(validation_data[1])
-            
+
         if self.val_cb and n_test!=0:
             # always update ids in case validation_data changed
-            if len(validation_ids)!=0:
-                self.val_cb.update_ids(validation_ids)
-            elif is_collection(validation_data[0]):
-                self.val_cb.update_ids(validation_data[0].files)
+            self.val_cb.update_data(validation_data,validation_ids=validation_ids)
+
 
         print(', '.join(['Training network for %d epochs'%n_epochs,
                          'starting at epoch %d'%initial_epoch,
@@ -522,7 +509,7 @@ class Model(object):
                           'with < %0.3f change')%(str(self.stop_early),
                                                   self.stop_delta)]))
 
-        validation_steps = len(validation_data[1])
+        validation_steps = n_test
         validation_gen = None
         if validation_data:
             validation_batch_size = 1
@@ -535,8 +522,7 @@ class Model(object):
                                             fill_partial=False,
                                             random_state=random_state,
                                             preprocessing_function=None,
-                                            verbose=0)
-            self.val_cb.update_data(validation_data[0],validation_data[1])
+                                            verbose=0)            
         
         trparm = dict(epochs=n_epochs,initial_epoch=initial_epoch,
                       validation_data=validation_gen,
@@ -595,7 +581,11 @@ def find_saved_models(state_dir,package,flavor):
 
     return model_meta, best_model
 
-def get_num_gpus():
+def get_num_gpus(with_keras=False):
+    if with_keras:
+        from keras import get_session
+        return len(get_session().list_devices())
+
     host_gpus = dict(gibson='0,1',valis='',mira='1,2')
     host_gpu = host_gpus.get(hostname(),'0')
     os.environ.setdefault('CUDA_VISIBLE_DEVICES',host_gpu)
