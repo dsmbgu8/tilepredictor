@@ -43,7 +43,7 @@ sys.path.append(abspath(os.getcwd()))
 
 # external import paths + libraries
 TP_EXT_LIB=['LatLongUTMconversion','CLR','AdamW-and-SGDW']
-TP_EXT_DIR='~/Research/src/python/external'
+TP_EXT_DIR=pathjoin(TP_ROOT_DIR,'external')
 TP_EXT_DIR=expanduser(os.getenv('TP_EXT_DIR',TP_EXT_DIR))
 if not pathexists(TP_EXT_DIR):
     warn('TP_EXT_DIR="%s" not found, exiting'%TP_EXT_DIR)
@@ -62,17 +62,20 @@ for lib_id in TP_EXT_LIB:
 # original version: http://robotics.ai.uiuc.edu/~hyoon24/LatLongUTMconversion.py
 #sys.path.insert(0,pathjoin(pyext,'LatLongUTMconversion'))
 
+# cyclic learning rate callback (https://github.com/bckenstler/CLR)
+#sys.path.insert(0,pathjoin(pyext,'CLR'))
+
+# proper Adam weight decay (https://github.com/shaoanlu/AdamW-and-SGDW)
+#sys.path.insert(0,pathjoin(pyext,'AdamW-and-SGDW'))
+
+
 #sys.path.insert(0,pathjoin(pyext,'keras2/build/lib'))
 #sys.path.insert(0,pathjoin(pyext,'keras204/build/lib'))
 #sys.path.insert(0,pathjoin(pyext,'keras207/build/lib'))
 #sys.path.insert(0,pathjoin(pyext,'keras208/build/lib'))
 #sys.path.insert(0,pathjoin(pyext,'keras-multiprocess-image-data-generator'))
 
-# cyclic learning rate callback (https://github.com/bckenstler/CLR)
-#sys.path.insert(0,pathjoin(pyext,'CLR'))
 
-# proper Adam weight decay (https://github.com/shaoanlu/AdamW-and-SGDW)
-#sys.path.insert(0,pathjoin(pyext,'AdamW-and-SGDW'))
 
 # image augmentation (https://github.com/aleju/imgaug)
 #sys.path.insert(0,pathjoin(pyext,'imgaug')) 
