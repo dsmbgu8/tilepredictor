@@ -6,8 +6,8 @@ gettime = time.time
 
 from tilepredictor_util import *
 
+model_path = pathjoin(TP_ROOT_DIR,'models')
 valid_packages = ['keras']
-model_path = pathjoin(tilepredictor_home,'models')
 valid_flavors = []
 for pkg in valid_packages:
     for path in glob(pathjoin(model_path,'*'+pkg+'*.py')):
@@ -20,7 +20,7 @@ default_package   = valid_packages[0] # 'keras'
 default_flavor    = valid_flavors[0] # 'cnn3'
 default_state_dir = pathjoin(os.getcwd(),'state')
 
-datagen_paramf    = pathjoin(tilepredictor_home,'datagen_params.json')
+datagen_paramf    = pathjoin(TP_ROOT_DIR,'datagen_params.json')
 
 # softmax probs are:
 # [0.0,0.5] class 0
