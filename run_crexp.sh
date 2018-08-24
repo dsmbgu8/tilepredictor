@@ -7,6 +7,7 @@ export TP_EXT_DIR=${HOME}/Research/src/python/external
 # set gpuid='' for cpu, or gpuid="0", "1" or "0,1"" for gpu,
 gpuid=''
 
+tp_exe=${TP_ROOT_DIR}/tilepredictor.py
 imagedir=${SRCFINDER_ROOT}/crexp_sub_bilinear
 outdir=$imagedir/salience
 
@@ -28,11 +29,21 @@ loadfunc=cmf2rgb_load_func.cmf2rgb_load_func_${ppmm_min}_${ppmm_max}
 
 # save CVD value to restore if necessary
 CVD_ORIG=${CUDA_VISIBLE_DEVICES}
-export CUDA_VISIBLE_DEVICES="$gpuid"
-TP_EXE=${TP_ROOT_DIR}/tilepredictor.py
-${TP_EXE} -f $flavor -m $package -w $modelfile --tile_dim $tdim \
+if [[ "$gpuid" == '' ]]; then
+    export CUDA_VISIBLE_DEVICES=''
+else
+    export CUDA_VISIBLE_DEVICES="$gpuid"
+fi
+
+if [ ! -d $outdir ]; then
+    mkdir -p $outdir
+    echo "created directory \"$outdir\""
+fi
+
+# here we go
+${tp_exe} -f $flavor -m $package -w $modelfile --tile_dim $tdim \
 	  --tile_bands $tbands --tile_stride $tstride \
 	  --image_dir $imagedir --output_dir $outdir \
 	  --load_func $loadfunc "ang*img_sub_bilinear"
-a
+
 export CUDA_VISIBLE_DEVICES=${CVD_ORIG}

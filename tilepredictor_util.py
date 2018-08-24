@@ -43,8 +43,8 @@ sys.path.append(abspath(os.getcwd()))
 
 # external import paths + libraries
 TP_EXT_LIB=['LatLongUTMconversion','CLR','AdamW-and-SGDW']
-TP_EXT_DIR=expanduser('~/Research/src/python/external')
-TP_EXT_DIR=os.getenv('TP_EXT_DIR',TP_EXT_DIR)
+TP_EXT_DIR='~/Research/src/python/external'
+TP_EXT_DIR=expanduser(os.getenv('TP_EXT_DIR',TP_EXT_DIR))
 if not pathexists(TP_EXT_DIR):
     warn('TP_EXT_DIR="%s" not found, exiting'%TP_EXT_DIR)
     sys.exit(1)
