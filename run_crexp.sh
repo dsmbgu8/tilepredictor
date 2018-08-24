@@ -1,10 +1,9 @@
 #!/bin/bash -v
 
-# updae the following as necessary
+# update the following as necessary
 export SRCFINDER_ROOT=/lustre/bbue/ch4/srcfinder
 export TP_ROOT_DIR=/lustre/bbue/ch4/tilepredictor
 export TP_EXT_DIR=${HOME}/Research/src/python/external
-
 # set gpuid='' for cpu, or gpuid="0", "1" or "0,1"" for gpu,
 gpuid=''
 
@@ -26,12 +25,14 @@ modelfile=${modeldir}/${flavor}_${package}/${modelweights}
 
 loadfunc=cmf2rgb_load_func.cmf2rgb_load_func_${ppmm_min}_${ppmm_max}
 
+
 # save CVD value to restore if necessary
 CVD_ORIG=${CUDA_VISIBLE_DEVICES}
 export CUDA_VISIBLE_DEVICES="$gpuid"
-tilepredictor.py -f $flavor -m $package -w $modelfile --tile_dim $tdim \
-		 --tile_bands $tbands --tile_stride $tstride \
-		 --image_dir $imagedir --output_dir $outdir \
-		 --load_func $loadfunc "ang*img_sub_bilinear"
+TP_EXE=${TP_ROOT_DIR}/tilepredictor.py
+${TP_EXE} -f $flavor -m $package -w $modelfile --tile_dim $tdim \
+	  --tile_bands $tbands --tile_stride $tstride \
+	  --image_dir $imagedir --output_dir $outdir \
+	  --load_func $loadfunc "ang*img_sub_bilinear"
 a
 export CUDA_VISIBLE_DEVICES=${CVD_ORIG}
