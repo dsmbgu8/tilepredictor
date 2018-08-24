@@ -3,6 +3,8 @@ srcfinderroot=/lustre/bbue/ch4/srcfinder
 imagedir=${srcfinderroot}/crexp_sub_bilinear
 outdir=$imagedir/salience
 
+package=keras
+flavor=xceptionpartial
 ppmm_min=250
 ppmm_max=4000
 tdim=128
@@ -11,8 +13,6 @@ tstride=5
 
 statedir=${srcfinderroot}/tiles/thompson_thorpe_training/state111417
 modeldir=${statedir}/cmflab_${ppmm_min}_${ppmm_max}_tdim${tdim}
-flavor=xceptionpartial
-package=keras
 weightfile=model_iter196_val_loss0.303678_pid58981.h5
 modelfile=${modeldir}/${flavor}_${package}/${weightfile}
 
