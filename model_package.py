@@ -597,18 +597,22 @@ def build_model(model_base,input_shape,model_backend='tensorflow',num_gpus=None)
     num_gpus = num_gpus or get_num_gpus()
     if model_backend == 'tensorflow':
         from tensorflow import device as tfdevice
-        from keras.utils import multi_gpu_model        
         if num_gpus==1:
             print('Building single-GPU tensorflow model')
             # build and run on single GPU
             #with tfdevice("/gpu:0"):
             #    model_base.build(input_shape)
-        elif num_gpus > 1:
+        elif num_gpus > 1:            
             print('Building multi-GPU tensorflow model')
-            # build on the CPU, distribute to multiple GPUs
-            #with tfdevice("/cpu:0"):
-            #    model_base.build(input_shape)
-            model_base = multi_gpu_model(model_base, gpus=num_gpus)
+            try:
+                from keras.utils import multi_gpu_model        
+                # build on the CPU, distribute to multiple GPUs
+                #with tfdevice("/cpu:0"):
+                #    model_base.build(input_shape)
+                model_base = multi_gpu_model(model_base, gpus=num_gpus)
+            except:
+                print('Unable to build multi_gpu_model')
+                pass
     return model_base
 
 def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
