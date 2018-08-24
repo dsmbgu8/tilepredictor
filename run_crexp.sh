@@ -3,7 +3,8 @@
 # update the following as necessary
 export SRCFINDER_ROOT=/lustre/bbue/ch4/srcfinder
 export TP_ROOT_DIR=/lustre/bbue/ch4/tilepredictor
-export TP_EXT_DIR=${HOME}/Research/src/python/external
+#export TP_EXT_DIR=${HOME}/Research/src/python/external
+export TP_EXT_DIR=${TP_ROOT_DIR}/external
 # set gpuid='' for cpu, or gpuid="0", "1" or "0,1"" for gpu,
 gpuid=''
 
