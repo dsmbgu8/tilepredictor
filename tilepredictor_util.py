@@ -1,12 +1,12 @@
 from __future__ import absolute_import, division, print_function
 
 import sys,os,json
+import time
 import threading
 
 from warnings import warn
 
 import numpy as np
-
 from socket import gethostname as hostname
 from os.path import abspath, expanduser, splitext, islink
 from os.path import join as pathjoin, split as pathsplit, exists as pathexists 
@@ -16,6 +16,12 @@ def filename(path):
     /path/to/file.ext -> file.ext
     '''
     return pathsplit(path)[1]
+
+def dirname(path):
+    '''
+    /path/to/file.ext -> /path/to
+    '''
+    return pathsplit(path)[0]
 
 def basename(path):
     '''
@@ -27,20 +33,34 @@ isdir      = os.path.isdir
 mkdir = os.makedirs
 mkdirs = mkdir
 
-import time
+TP_ROOT_DIR=dirname(__file__)
+print('TP_ROOT_DIR: "%s"'%str((TP_ROOT_DIR)))
+
 gettime = time.time
 
-tilepredictor_home = pathsplit(__file__)[0]
-sys.path.append(abspath(tilepredictor_home))
+sys.path.append(abspath(TP_ROOT_DIR))
 sys.path.append(abspath(os.getcwd()))
 
-# external imports
-pyext=expanduser('~/Research/src/python/external')
+# external import paths + libraries
+TP_EXT_LIB=['LatLongUTMconversion','CLR','AdamW-and-SGDW']
+TP_EXT_DIR=expanduser('~/Research/src/python/external')
+TP_EXT_DIR=os.getenv('TP_EXT_DIR',TP_EXT_DIR)
+if not pathexists(TP_EXT_DIR):
+    warn('TP_EXT_DIR="%s" not found, exiting'%TP_EXT_DIR)
+    sys.exit(1)
 
+print('TP_EXT_DIR: "%s"'%str((TP_EXT_DIR)))    
+for lib_id in TP_EXT_LIB:
+    lib_dir = pathjoin(TP_EXT_DIR,lib_id)
+    if not pathexists(lib_dir):
+        warn('TP_EXT_LIB library path "%s" not found, exiting'%lib_dir)
+        sys.exit(1)
+    sys.path.insert(0,lib_dir)        
+                 
 # LatLongUTMconversion
 # current version: https://github.jpl.nasa.gov/bbue/srcfinder/tree/master/LatLongUTMconversion
 # original version: http://robotics.ai.uiuc.edu/~hyoon24/LatLongUTMconversion.py
-sys.path.insert(0,pathjoin(pyext,'LatLongUTMconversion'))
+#sys.path.insert(0,pathjoin(pyext,'LatLongUTMconversion'))
 
 #sys.path.insert(0,pathjoin(pyext,'keras2/build/lib'))
 #sys.path.insert(0,pathjoin(pyext,'keras204/build/lib'))
@@ -49,10 +69,10 @@ sys.path.insert(0,pathjoin(pyext,'LatLongUTMconversion'))
 #sys.path.insert(0,pathjoin(pyext,'keras-multiprocess-image-data-generator'))
 
 # cyclic learning rate callback (https://github.com/bckenstler/CLR)
-sys.path.insert(0,pathjoin(pyext,'CLR'))
+#sys.path.insert(0,pathjoin(pyext,'CLR'))
 
 # proper Adam weight decay (https://github.com/shaoanlu/AdamW-and-SGDW)
-sys.path.insert(0,pathjoin(pyext,'AdamW-and-SGDW')) 
+#sys.path.insert(0,pathjoin(pyext,'AdamW-and-SGDW'))
 
 # image augmentation (https://github.com/aleju/imgaug)
 #sys.path.insert(0,pathjoin(pyext,'imgaug')) 
