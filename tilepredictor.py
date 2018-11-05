@@ -26,7 +26,7 @@ def aximshow(ax,img,ylab,vmin=None,vmax=None,cmap=None):
     ax.set_ylabel(ylab)
     return ret
 
-def plot_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
+def save_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
                      output_dir=None,output_prefix='',
                      mask_zero=False,mask_prob=False,
                      mask_nodata=False,do_show=False):
@@ -53,12 +53,17 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
     img_pred = pred_out['img_pred']
     img_prob = pred_out['img_prob']
     img_mask = pred_out['img_mask']
-        
+
+    prob_pos = pred_out['prob_pos']
+    prob_total = pred_out['prob_total']
+    
     if output_dir and mapinfo:
         smaxtime = gettime()
         save_envi_output('prob_softmax',np.float32(img_prob),mapinfo,
                          mask_nodata=mask_nodata)
         save_envi_output('pred_softmax',np.int16(img_pred),mapinfo,
+                         mask_nodata=mask_nodata)
+        save_envi_output('prob_pos',np.float32(prob_pos),mapinfo,
                          mask_nodata=mask_nodata)
         if not mask_nodata and img_mask.any():
             save_envi_output('nodata_mask',np.int16(img_mask),mapinfo,
@@ -74,7 +79,7 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
     # pixels with no predictions
     img_counts = img_pred.copy()
     img_total = img_counts.sum(axis=2)    
-
+    
     # find valid pixels with at least 1 prediction, ignore everything else
     img_invalid = ~np.isfinite(img_total) | img_mask
     img_haspred  = (img_total!=0)
@@ -93,14 +98,14 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
     img_vote[img_neg] = -img_counts[img_neg,0]
     
     # vote confidence (#classpredictions/#totalpredictions per-pixel)
-    img_vcon = np.zeros_like(img_total,dtype=np.float32)
-    img_vcon[img_pos] = img_vote[img_pos] / img_total[img_pos]
-    img_vcon[img_neg] = img_vote[img_neg] / img_total[img_neg]
+    #img_vcon = np.zeros_like(img_total,dtype=np.float32)
+    #img_vcon[img_pos] = img_vote[img_pos] / img_total[img_pos]
+    #img_vcon[img_neg] = img_vote[img_neg] / img_total[img_neg]
 
     # prob confidence (probs*#classpredictions/#totalpredictions per-pixel)
-    img_pcon = np.zeros_like(img_total,dtype=np.float32)
-    img_pcon[img_pos] = img_vcon[img_pos]*img_prob[img_pos,1]
-    img_pcon[img_neg] = img_vcon[img_neg]*img_prob[img_neg,0]
+    #img_pcon = np.zeros_like(img_total,dtype=np.float32)
+    #img_pcon[img_pos] = img_vcon[img_pos]*img_prob[img_pos,1]
+    #img_pcon[img_neg] = img_vcon[img_neg]*img_prob[img_neg,0]
                       
     # flatten predicted class probabilities
     img_prob = np.where(img_pos,img_prob[...,1],-img_prob[...,0])
@@ -127,19 +132,23 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
         img_class[img_mask] = 0
         img_pred[img_mask] = 0
         img_prob[img_mask] = 0
-        img_vcon[img_mask] = 0
-        img_pcon[img_mask] = 0
+        img_vote[img_mask] = 0
+        #img_vcon[img_mask] = 0
+        #img_pcon[img_mask] = 0
         
     max_vote = max(np.abs(list(extrema(img_vote))))
+    #max_vcon = max(np.abs(list(extrema(img_vcon))))
+    #max_pcon = max(np.abs(list(extrema(img_pcon))))
+    #max_prob = max(np.abs(list(extrema(img_prob))))
     print('Confidence image generation time: %0.3f seconds'%(gettime()-pgentime))
 
     if do_show:
-        fig,ax = pl.subplots(5,1,sharex=True,sharey=True,figsize=(16,10))
+        fig,ax = pl.subplots(4,1,sharex=True,sharey=True,figsize=(16,10))
         aximshow(ax[0],img_test,'test') 
         aximshow(ax[1],img_class,'class',vmin=-1.0,vmax=1.0)          
-        aximshow(ax[2],img_prob,'prob',vmin=-1.0,vmax=1.0)
-        aximshow(ax[3],img_vcon,'vcon',vmin=-1.0,vmax=1.0)
-        aximshow(ax[4],img_pcon,'pcon',vmin=-1.0,vmax=1.0)
+        aximshow(ax[2],prob_pos,'prob_pos',vmin=0,vmax=1)
+        #aximshow(ax[3],img_vcon,'vcon',vmin=-max_vote,vmax=max_vote)
+        #aximshow(ax[3],img_pcon,'pcon',vmin=-max_pcon,vmax=max_pcon)
 
         if len(lab_mask)!=0:
             lab_mask = (lab_mask>0)
@@ -153,40 +162,39 @@ def plot_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
         pexptime = gettime()
         if mapinfo:
             save_envi_output('prob',np.float32(img_prob),mapinfo)
-            save_envi_output('vcon',np.float32(img_vcon),mapinfo)
-            save_envi_output('pcon',np.float32(img_pcon),mapinfo)
+            #save_envi_output('vcon',np.float32(img_vcon),mapinfo)
+            #save_envi_output('pcon',np.float32(img_pcon),mapinfo)
         img_vote = array2rgba(img_vote,  vmin=-max_vote,vmax=max_vote)
-        img_class = array2rgba(img_class) #,vmin=-1.0,vmax=1.0)
-        img_prob = array2rgba(img_prob) #,  vmin=-1.0,vmax=1.0)
-        img_vcon = array2rgba(img_vcon,  vmin=-1.0,vmax=1.0)
-        img_pcon = array2rgba(img_pcon,  vmin=-1.0,vmax=1.0)
+        img_class = array2rgba(img_class,vmin=-1.0,vmax=1.0)
+        prob_pos = array2rgba(prob_pos,vmin=0,vmax=0) #,  vmin=-1.0,vmax=1.0)
+        #img_vcon = array2rgba(img_vcon,  vmin=-max_vcon,vmax=max_vcon)
+        #img_pcon = array2rgba(img_pcon,  vmin=-max_pcon,vmax=max_pcon)
         save_png_output('pred',img_class)
-        save_png_output('prob',img_prob)        
-        save_png_output('vcon',img_vcon)
-        save_png_output('pcon',img_pcon)
+        save_png_output('prob_pos',prob_pos)        
+        #save_png_output('vcon',img_vcon)
+        #save_png_output('pcon',img_pcon)
         print('Confidence image export time: %0.3f seconds'%(gettime()-pexptime))
             
-
-def write_csv(csvf,imgid,pred_list,tile_dim,prob_thresh=0.0,img_map=None):
+def write_csv(csvf,imgid,pred_list,prob_thresh=0.5,img_map=None):
     # geolocate detections with .hdr files
     #tile_out = pred_out['pred_list']
 
     header = ['imgid','row','col','prob_pos']
     assert(pred_list.shape[1]==len(header)-1)
 
-    keep_mask = np.float32(pred_list[:,-1])>=prob_thresh
+    keep_mask = np.float32(pred_list[:,-1])>prob_thresh
     if (~keep_mask).all():
         warn('no detections with prediction probability >= %f'%prob_thresh)
         return
     
     pred_keep = pred_list[keep_mask,:]
     # offset line,samp by tile center
-    line,samp = (tile_dim//2)+np.float32(pred_keep[:,[1,2]]).T
+    line,samp = np.float32(pred_keep[:,[1,2]]).T
     probpos = pred_keep[:,-1]     
     if img_map:        
         zone,hemi = img_map['zone'],img_map['hemi']
         zonealpha = zone + ('N' if hemi=='North' else 'M')
-        header.extend(['lat','lon','utmx','utmy','zone','hemi'])
+        header.extend(['lat','lon']) #,'utmx','utmy','zone','hemi'])
 
     outcsv = []
     #sortv = (line*(samp.max()+1))+samp # sort by line,sample
@@ -208,7 +216,7 @@ def write_csv(csvf,imgid,pred_list,tile_dim,prob_thresh=0.0,img_map=None):
 def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
                    preprocess=None, img_map=None, backend='tensorflow',
                    lab_mask=[], verbose=0, transpose=False, print_status=True,
-                   do_show=False):
+                   pred_thr=0.0, do_show=False):
     from skimage.util.shape import view_as_windows
 
     input_shape = model.layers[0].input_shape
@@ -240,6 +248,10 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     radd = stride-(rows%stride)
     cadd += tile_dim-(cols+cadd)%tile_dim
     radd += tile_dim-(rows+radd)%tile_dim
+
+    # add 1 more tile_dim to prevent edge effects
+    #cadd += tile_dim
+    #radd += tile_dim
     
     if cadd > 0:
         csbuf = np.zeros([rows,tile_dim,bands],dtype=img_dtype)
@@ -276,6 +288,8 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     n_rb,n_cb = len(rrange),len(crange)
     cb_den = max(1,n_cb // 1000)
     batch_size = max(2*(n_cb//2),int(np.sqrt(n_cb))**2)//cb_den
+
+    batch_size = min(batch_size,480)
     
     pmsg = 'Collecting predictions'
     print(pmsg+', size = %d x %d tiles (tile_dim=%d, stride=%d)'%(n_rb,
@@ -429,18 +443,23 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
 
         # posttime = gettime()
         pj = 0
+        tile_off = (tile_dim//2)
         for j,cbeg in enumerate(crange):
             cend = cbeg+tile_dim
             if rmask[j]:
                 img_prob[rbeg:rend,cbeg:cend,:] += rprob[pj]
                 img_pred[rbeg:rend,cbeg:cend,rpred[pj]] += 1
-                pred_list.append([rbeg,cbeg,rprob[pj,1]])
+                if pred_thr==0:
+                    roff,coff = rbeg+tile_off,cbeg+tile_off
+                    pred_list.append([roff,coff,rprob[pj,1]])
                 pj+=1
             else:
                 # already know pred + prob for null entries
                 img_prob[rbeg:rend,cbeg:cend,:] += prob0[0]
                 img_pred[rbeg:rend,cbeg:cend,pred0] += 1
-                pred_list.append([rbeg,cbeg,prob0[0,1]])  
+                if pred_thr==0:
+                    roff,coff = rbeg+tile_off,cbeg+tile_off
+                    pred_list.append([roff,coff,prob0[0,1]])  
 
         #posttime += (gettime()-posttime)
 
@@ -517,14 +536,20 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
         img_prob = img_prob.transpose((1,0,2))
         img_mask = img_mask.transpose((1,0))
 
+    prob_total = img_prob.sum(axis=2)
+    prob_pos = np.where(prob_total!=0,img_prob[...,1]/prob_total,0)
+
+        
     pred_out = dict(img_prob=img_prob,
                     img_pred=img_pred,
                     img_mask=img_mask,
+                    prob_pos=prob_pos,
+                    prob_total=prob_total,
                     pred_list=pred_list)
 
     if output_dir:
         print('img_map: "%s"'%str((img_map)))
-        plot_pred_images(img_rgb,pred_out,mapinfo=img_map,lab_mask=lab_mask,
+        save_pred_images(img_rgb,pred_out,mapinfo=img_map,lab_mask=lab_mask,
                          output_dir=output_dir,output_prefix=output_prefix,
                          do_show=do_show)
         
