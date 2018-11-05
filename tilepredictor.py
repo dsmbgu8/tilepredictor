@@ -913,8 +913,7 @@ if __name__ == '__main__':
                                           do_show=do_show)
 
             pred_list = salience_out['pred_list']
-            write_csv(img_csvf,img_id,pred_list,tile_dim,prob_thresh,
-                      img_map=img_map)
+            write_csv(img_csvf,img_id,pred_list,prob_thresh,img_map)
             print('Completed salience processing for imageid "%s"'%img_id)
 
             if do_show:
