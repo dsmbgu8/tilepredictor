@@ -175,7 +175,7 @@ def save_pred_images(img_data,pred_out,mapinfo=None,lab_mask=[],
         #save_png_output('pcon',img_pcon)
         print('Confidence image export time: %0.3f seconds'%(gettime()-pexptime))
             
-def write_csv(csvf,imgid,pred_list,prob_thresh=0.5,img_map=None):
+def write_csv(csvf,imgid,pred_list,prob_thresh=0.75,img_map=None):
     # geolocate detections with .hdr files
     #tile_out = pred_out['pred_list']
 
@@ -843,6 +843,7 @@ if __name__ == '__main__':
                           pred_labs, pred_prob, pred_mets, fnratfpr=0.01)
         print('Saved test predictions to "%s"'%pred_file)
 
+        
     if img_dir:
         if isdir(img_dir):
             img_files = glob(pathjoin(img_dir,img_pattern))
@@ -864,9 +865,9 @@ if __name__ == '__main__':
             img_base = basename(imagef)
             img_id = filename2flightid(imagef)
             img_output_prefix = img_base
-            img_csvf = pathjoin(output_dir,img_output_prefix+'%s.csv'%thresh_str)
-            if not clobber and pathexists(img_csvf):
-                print('Output "%s" exists, skipping'%img_csvf)
+            img_posf = pathjoin(output_dir,img_output_prefix+'_prob_pos')
+            if not clobber and pathexists(img_posf):
+                print('Output "%s" exists, skipping'%img_posf)
                 continue
 
             img_data = load_func(imagef)
@@ -903,8 +904,7 @@ if __name__ == '__main__':
             print('output_dir: "%s"'%str((output_dir)))
             print('img_output_prefix: "%s"'%str((img_output_prefix)))
             salience_out = image_salience(model.base,img_data,tile_stride,
-                                          output_dir,
-                                          img_output_prefix,
+                                          output_dir,img_output_prefix,
                                           preprocess=model.preprocess,
                                           backend=model.backend,
                                           lab_mask=lab_mask,
@@ -913,6 +913,7 @@ if __name__ == '__main__':
                                           do_show=do_show)
 
             pred_list = salience_out['pred_list']
+            img_csvf = pathjoin(output_dir,img_output_prefix+'%s.csv'%thresh_str)            
             write_csv(img_csvf,img_id,pred_list,prob_thresh,img_map)
             print('Completed salience processing for imageid "%s"'%img_id)
 
