@@ -41,6 +41,9 @@ gettime = time.time
 sys.path.append(abspath(TP_ROOT_DIR))
 sys.path.append(abspath(os.getcwd()))
 
+# WGO: Defining _DEG2RAD
+_DEG2RAD = np.pi/180.0
+
 # external import paths + libraries
 TP_EXT_LIB=['LatLongUTMconversion','CLR','AdamW-and-SGDW']
 TP_EXT_DIR=pathjoin(TP_ROOT_DIR,'external')
