@@ -12,3 +12,4 @@ dependencies:
   - pip=19.3.1
   - pip:
     - spectral==0.19
+    - progressbar==2.5
