@@ -3,8 +3,19 @@ import sys
 import time
 from glob import glob
 gettime = time.time
+import matplotlib
+matplotlib.use('agg')
+import pylab as pl
 
 from tilepredictor_util import *
+TP_ROOT_DIR=os.getenv('TP_ROOT_DIR',dirname(__file__))
+
+import time
+timefmt = "%Y%m%dt%H%M%S" #"%b_%d_%Y_%H:%M:%S"
+epoch2local = time.localtime
+strftime = time.strftime
+local2str = lambda tlocal: strftime(timefmt,tlocal)
+epoch2str = lambda tepoch: local2str(epoch2local(tepoch))
 
 model_path = pathjoin(TP_ROOT_DIR,'models')
 valid_packages = ['keras']
@@ -15,11 +26,10 @@ for pkg in valid_packages:
         valid_flavors.append(flavor_file.split('_')[0])
                           
 valid_flavors = list(set(valid_flavors))
-
+#print(model_path,valid_flavors)
 default_package   = valid_packages[0] # 'keras'
 default_flavor    = valid_flavors[0] # 'cnn3'
 default_state_dir = pathjoin(os.getcwd(),'state')
-
 datagen_paramf    = pathjoin(TP_ROOT_DIR,'datagen_params.json')
 
 # softmax probs are:
@@ -35,15 +45,15 @@ default_n_hidden = 1024 # nodes in last FC layer before classification
 default_n_classes = 2 # we currently only consider binary classification problems 
 
 # optimizer parameters
-use_multiprocessing = False
-n_workers = 4
-queue_size = 10
+n_workers = 1
+queue_size = n_workers*50
 
 random_state = 42
 tol = 0.00001
 momentum = 0.9
 
-optclass='Nadam' # 'SGD'
+optclass='Nadam' # 
+
 optparams = dict(
     lr_min = 0.0001,
     lr_max = 0.01,
@@ -75,13 +85,26 @@ def save_datagen_params(paramf,params,verbose=0,**kwargs):
     return save_json(paramf,params,**kwargs)
 
 @threadsafe_generator
-def datagen_arrays(X,y,batch_size,datagen_params,shuffle=False,
+def datagen_arrays(Xorig,yorig,batch_size,datagen_params,shuffle=False,
                    fill_partial=False,random_state=random_state,
                    preprocessing_function=None,outdir=None,
-                   save_batches=100, verbose=0):
+                   save_batches=0, verbose=0):
+    outdir = outdir or '.'
+    nx = len(Xorig)
+    nadd = nx-((nx//batch_size)*batch_size)
+    if nadd!=0:
+        ridx = randperm(nx)[:nadd]
+        X = np.r_[Xorig,[Xorig[ri] for ri in ridx]]
+        y = np.r_[yorig,[yorig[ri] for ri in ridx]]
+        nx = nx+nadd
+        if X.ndim != 4:
+            X = X[...,np.newaxis]
+    else:
+        X,y = Xorig,yorig
 
+
+    
     datagen_model = datagen_params.pop('model','ImageDataGenerator')
-
     if datagen_model == 'ImageDataGenerator':
         from keras.preprocessing.image import ImageDataGenerator
         # only call datagen.fit() if these keys are present
@@ -119,22 +142,41 @@ def datagen_arrays(X,y,batch_size,datagen_params,shuffle=False,
             X_batch = X_batch.concatenate()
 
         if fill_partial and X_batch.ndim==4 and X_batch.shape[0] < batch_size:
-            X_fill,y_fill = fill_batch(X_batch,y_batch,batch_size,balance=True)
+            # X_fill,y_fill = fill_batch(X_batch,y_batch,batch_size,balance=True)
             fill_idx = fill_batch(X_batch,y_batch,batch_size,balance=True)
             X_fill,y_fill = X_batch[fill_idx], y_batch[fill_idx]
-            X_batch = np.r_[X_batch,map(datagen_transform,X_fill)]
+            X_batch = np.r_[X_batch,[datagen_transform(Xfi) for Xfi in X_fill]]
             y_batch = np.r_[y_batch,y_fill]
             if len(X_idx) != 0:
                 X_idx = np.r_[X_idx,X_idx[fill_idx]]
                 
-        if verbose>1 and bi==0:
+        if bi==0 and len(X_batch) > 1:
+            y_batch_bin = to_binary(y_batch)
             print('\nBatch %d: '%bi,
                   'X_batch.shape: %s,'%str(X_batch.shape),
                   'y_batch.shape: %s'%str(y_batch.shape))
             band_stats(X_batch,verbose=1)
-            class_stats(to_binary(y_batch),verbose=1)
+            class_stats(y_batch_bin,verbose=1)
 
-        if bi < save_batches and outdir is not None and pathexists(outdir):
+            for y_batch_lab in np.unique(y_batch_bin):
+                X_batch_lab = X_batch[y_batch_bin==y_batch_lab]
+                nbsaved = min(5,len(X_batch_lab))
+                print('Rendering',str(nbsaved),'images of class',str(y_batch_lab),'of first batch')
+                for bj in range(nbsaved):
+                    batchfigf = 'X_firstbatch_lab%d_image%dof%d.pdf'%(y_batch_lab,bj+1,
+                                                                      len(X_batch_lab))
+                    batchfigf = pathjoin(outdir,batchfigf)
+                    try:
+                        fig = pl.figure()
+                        pl.imshow(X_batch_lab[bj])
+                        pl.savefig(batchfigf)
+                        print('Saved',batchfigf)
+                        pl.close(fig)
+                    except:
+                        print('Unable to save',batchfigf)
+                        break
+            
+        if bi < save_batches:
             batchoutf = pathjoin(outdir,'batch%d.mat'%bi)
             batchdict = dict(X_batch=X_batch,y_batch=y_batch,
                              shuffle=shuffle, fill_partial=fill_partial,
@@ -169,9 +211,9 @@ def datagen_directory(path,target_size,batch_size,datagen_params,
     for bi, (X_batch, y_batch) in enumerate(datagen_iter):
         if fill_partial and X_batch.ndim==4 and X_batch.shape[0] < batch_size:
             X_fill,y_fill = fill_batch(X_batch,y_batch,batch_size,balance=True)
-            fill_idx = fill_batch(X_batch,y_batch,batch_size,balance=True)
+            fill_idx = np.int32(fill_batch(X_batch,y_batch,batch_size,balance=True))
             X_fill,y_fill = X_batch[fill_idx], y_batch[fill_idx]
-            X_batch = np.r_[X_batch,map(datagen_transform,X_fill)]
+            X_batch = np.r_[X_batch,[datagen_transform(Xfi) for Xfi in X_fill]]
             y_batch = np.r_[y_batch,y_fill]
 
         if verbose>1 and bi==0:
@@ -180,7 +222,7 @@ def datagen_directory(path,target_size,batch_size,datagen_params,
                   'y_batch.shape: %s'%str(y_batch.shape))
             band_stats(X_batch,verbose=1)
             class_stats(to_binary(y_batch),verbose=1)
-
+            
         if outdir is not None and pathexists(outdir):
             batchoutf = pathjoin(outdir,'batch%d.mat'%bi)
             batchdict = dict(X_batch=X_batch,y_batch=y_batch,
@@ -189,7 +231,7 @@ def datagen_directory(path,target_size,batch_size,datagen_params,
             for key,val in datagen_params.items():
                 if val is not None:
                     batchdict.setdefault(key,val)
-            savemat(batchoutf,batchdict,verbose=1,overwrite=True)            
+            savemat(batchoutf,batchdict,verbose=0,overwrite=True)            
         yield X_batch, y_batch
 
 def parse_model_meta(modelf,val_monitor='val_loss'):
@@ -234,7 +276,7 @@ def parse_model_meta(modelf,val_monitor='val_loss'):
                 
     return start_epoch, start_monitor
     
-class Model(object):
+class ModelWrapper(object):
     """
     Model: wrapper class for package model predictor functions
     """
@@ -271,7 +313,7 @@ class Model(object):
         model_suf = '_'.join([self.flavor,self.package])
         self.model_dir = pathjoin(self.state_dir,model_suf)
         if not pathexists(self.model_dir):
-            makedirs(self.model_dir,verbose=True)
+            os.makedirs(self.model_dir)
 
     def preprocess(self,img,transpose=True,verbose=0):
         shape = img.shape
@@ -309,12 +351,12 @@ class Model(object):
         if verbose:
             print('Before preprocess: '
                   'type=%s, shape=%s, '%(str(dtype),str(shape)),
-                  'range = %s'%str(map(list,np.c_[imin,imax])))
+                  'range = %s'%str(list(map(list,np.c_[imin,imax]))))
             otype = imgpre.dtype
             oshape = imgpre.shape
             print('After preprocess: '
                   'type=%s, shape=%s, '%(str(otype),str(oshape)),
-                  'range = %s'%str(map(list,np.c_[omin,omax])))
+                  'range = %s'%str(list(map(list,np.c_[omin,omax]))))
         
         return imgpre
 
@@ -365,19 +407,19 @@ class Model(object):
         
         # strides to test/save model during training        
         test_period = kwargs.pop('test_period',1)
-        save_period = kwargs.pop('save_period',None)
-        warmup_epoch = kwargs.pop('warmup_epoch',5)         
+        save_period = kwargs.pop('save_period',0) # 0 = disable
+        warmup_epoch = kwargs.pop('warmup_epoch',3)
         random_state = kwargs.pop('random_state',42)
         verbose = kwargs.pop('verbose',1)
 
         test_ids = kwargs.pop('test_ids',[])
         
         step_lr = kwargs.pop('step_lr',None)
-        clr_mult = kwargs.pop('clr_mult',4)
+        clr_mult = kwargs.pop('clr_mult',4) # total epochs before CLR changes signs
 
         # exit early if the last [stop_early] test scores are all worse than the best
         early_stop = int(n_epochs*0.2)
-        stop_early = kwargs.pop('stop_early',early_stop) or early_stop
+        stop_early = kwargs.pop('stop_early',None) or early_stop
         
         stop_delta = optparams['stop_delta']
 
@@ -523,12 +565,13 @@ class Model(object):
                                             random_state=random_state,
                                             preprocessing_function=None,
                                             verbose=0)            
-        
+
+        max_queue_size = min(queue_size,n_batches)
         trparm = dict(epochs=n_epochs,initial_epoch=initial_epoch,
                       validation_data=validation_gen,
                       validation_steps=validation_steps,
-                      max_queue_size=queue_size,                      
-                      use_multiprocessing=use_multiprocessing,
+                      max_queue_size=max_queue_size,
+                      use_multiprocessing=(n_workers>1),
                       workers=n_workers,verbose=1)
         trhist = self.base.fit_generator(train_gen,n_batches,
                                          callbacks=self.callbacks,
@@ -619,6 +662,7 @@ def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
     from keras.backend import image_data_format,set_image_data_format
     from keras import __version__ as _keras_version
     from importlib import import_module
+    global optclass
 
     package     = kwargs.pop('model_package',default_package)
     flavor      = kwargs.pop('model_flavor',default_flavor)
@@ -627,7 +671,7 @@ def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
     flavorp     = kwargs.pop('flavor_params',{})
     num_gpus    = kwargs.pop('num_gpus',get_num_gpus())
     val_monitor = kwargs.pop('val_monitor','val_loss')
-    optclass    = kwargs.pop('optclass','Nadam')
+    optclass    = kwargs.pop('optclass',optclass)
     lr_scalef   = kwargs.pop('lr_scalef',None)
     
     print('Initializing new %s_%s model with parameters:'%(flavor,package))
@@ -687,7 +731,7 @@ def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
     model_rtranspose = [0,1,2]
     image_format = 'channels_last'
     if backend_image_format:
-        if model_backend=='tensorflow':
+        if model_backend=='tensorflow' or model_backend.startswith('plaidml.keras'):
             image_format = 'channels_last'
             if input_shape[0]==n_bands:
                 warn('Converted input_shape "%s" to "channels_last"'
@@ -729,7 +773,14 @@ def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
                                                      optparam=optparams)
     model_input_shape = model_base.layers[0].input_shape
     model_output_shape = model_base.layers[-1].output_shape
+
+    if len(model_input_shape)==1:
+        model_input_shape=model_input_shape[0]
+    if len(model_output_shape)==1:
+        model_output_shape=model_output_shape[0]
     
+    print('input_shape: "%s"'%str((input_shape)))
+    print('model_input_shape: "%s"'%str((model_input_shape)))
     assert(tuple(input_shape) == model_input_shape[-len(input_shape):])
     assert(output_shape[-1] == model_output_shape[-1])    
     model_params['model'] = model_base
@@ -760,7 +811,7 @@ def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
     # update optimizer class if necessary
     print("Using optimizer",optclass)
     optparams['optclass'] = optclass
-        
+    
     model_base = build_model(model_base,input_shape,model_backend,num_gpus)
     model_params = package_lib.model_init(model_base,flavor,state_dir,
                                           optparams,**kwargs)
@@ -771,26 +822,28 @@ def compile_model(input_shape,n_classes,n_bands,n_hidden=None,**kwargs):
     model_params.setdefault('rtranspose',model_rtranspose)
     model_params.setdefault('input_shape',input_shape)
     model_params.setdefault('pid',model_pid)
-    model = Model(**model_params)
+    model = ModelWrapper(**model_params)
     
     model_png = pathjoin(model_dir,'model_pid%d.png'%model_pid)
     if pathexists(model_png):
         os.remove(model_png) # delete the old png to avoid irritating warnings
     try:
         from keras.utils import plot_model        
-        plot_model(model.base, to_file=model_png, show_layer_names=True,
-                   show_shapes=True)
+        plot_model(model.base, to_file=model_png, show_shapes=True)
         print('Saved model diagram to "%s"'%model_png)
     except Exception as e:
-        from keras.utils import print_summary
         warn('Unable to generate model plot "%s" due to exception: %s'%(model_png,
                                                                         str(e)))
-        print('Saving text-based model instead')
-        model_txt = pathjoin(model_dir,'model_layers_pid%d.txt'%model_pid)
+    model_txt = pathjoin(model_dir,'model_layers_pid%d.txt'%model_pid)
+    try:
+        from keras.utils import print_summary
         with open(model_txt,'w') as fid:
             print2fid = lambda *args: print(''.join(args),file=fid)
             print_summary(model.base,print_fn=print2fid)
-
+    except Exception as e:
+        warn('Unable to generate text model "%s" due to exception: %s'%(model_txt,
+                                                                        str(e)))
+        
     model_summary(model.base)
             
     print('Compiling',flavor,'model')
