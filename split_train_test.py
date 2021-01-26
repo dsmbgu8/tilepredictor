@@ -1,7 +1,9 @@
+#!/usr/bin/env python3
 from __future__ import absolute_import, division, print_function
 import sys
 import numpy as np
 from load_data import *
+sys.path.append(os.environ['pyutil'])
 from pylib import *
 
 try:
@@ -99,10 +101,15 @@ if __name__ == '__main__':
                         type=int, default=1)
     parser.add_argument("-m","--mode", type=str, default='kfold',
                         help="split mode (single|multiple|kfold|path)")
+    parser.add_argument("--excludefile", type=str, default=None,
+                        help="File containing list of samples to exclude")
+    
     
     parser.add_argument("labelfile", type=str, help="label file")
     
     args = parser.parse_args(sys.argv[1:])
+    exclf = args.excludefile
+    
     labf = args.labelfile
     k = int(args.num_splits)
     mode = args.mode
@@ -112,6 +119,19 @@ if __name__ == '__main__':
     print('loading',labf)
     (X,y) = load_file(labf,load_func=lambda f: f,class_mode='binary')
     X = np.array(X.files)
+    if exclf is not None:
+        exclude = np.loadtxt(exclf,dtype=str)
+        badmask = np.zeros(len(X),dtype=np.bool8)
+        for i,xi in enumerate(X):
+            for exci in exclude:
+                if basename(exci) in xi:
+                    badmask[i]=1
+                    break
+        n_bad = np.count_nonzero(badmask)
+        if n_bad!=0:
+            print('excluded',n_bad,'samples listed in',exclf)
+            X = X[~badmask]
+            y = y[~badmask]
 
     if mode=='single':
         X_train,y_train,X_test,y_test = split_single(X,y)
@@ -125,8 +145,8 @@ if __name__ == '__main__':
     for fold in range(k):
         if verbose:
             print('fold',fold+1,'of',k)
-            print('Training classes',Counter(y_train[fold]).items())
-            print('Testing classes',Counter(y_test[fold]).items())
+            print('Training classes',counts(y_train[fold]))
+            print('Testing classes',counts(y_test[fold]))
 
         foldid = 'fold%dof%d'%(fold+1,k) if k>1 else 'split'
         
