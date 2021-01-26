@@ -13,19 +13,19 @@ def print_version():
     raw_input()
 
 def load_model(modelf,**kwargs):
-    from keras.models import _clone_sequential_model, Sequential, \
+    from keras.models import clone_model as _clone_model, Sequential, \
         load_model as _load_model
     # import these since keras doesn't load them by default
-    from AdamW import AdamW
-    from SGDW import SGDW
+    #from AdamW import AdamW
+    #from SGDW import SGDW
     custom_objects = kwargs.pop('custom_objects',{})
-    custom_objects['AdamW'] = AdamW
-    custom_objects['SGDW'] = SGDW
+    #custom_objects['AdamW'] = AdamW
+    #custom_objects['SGDW'] = SGDW
     
     flatten = kwargs.pop('flatten',False)
     model = _load_model(modelf,custom_objects=custom_objects,**kwargs)
     if flatten and model.layers[0].name.startswith('sequential_'):
-        _model = _clone_sequential_model(model.layers[0])
+        _model = _clone_model(model.layers[0])
         for layer in model.layers[1:]:
             _model.add(layer)
         model = _model
@@ -36,7 +36,7 @@ def backend():
     return _backend
 
 def update_base_outputs(model_base,output_shape,optparam,hidden_type='fc'):
-    from keras.models import Model, Sequential
+    from keras.models import Model as KerasModel, Sequential
     from keras.layers import Dense, Input
     from keras.regularizers import l2 as activity_l2
     from keras.constraints import max_norm as max_norm_constraint
@@ -53,8 +53,7 @@ def update_base_outputs(model_base,output_shape,optparam,hidden_type='fc'):
     if max_norm!=np.inf:
         obj_param['kernel_constraint']=max_norm_constraint(max_norm)
 
-    model_input = model_base.layers[0].input
-    model_input_shape = model_base.layers[0].input_shape
+    model_input_shape = model_base.layers[0].input_shape[0]
     print('model_input_shape=%s'%str(model_input_shape))
     
     if hidden_type=='fc':
@@ -68,12 +67,13 @@ def update_base_outputs(model_base,output_shape,optparam,hidden_type='fc'):
     output_layer = Dense(n_classes, activation='softmax', **obj_param)
 
     mclass = model_base.__class__.__name__
-    if mclass == 'Sequential':
+    if 1 or mclass == 'Sequential':
         print("Using Sequential model")
-        model = model_base
+        model = Sequential()
+        model.add(model_base)        
         if hidden_layer:
             model.add(hidden_layer)
-        model.add(output_layer) 
+        model.add(output_layer)
     else:
         print("Using functional API")
         inputs = model_base.layers[0].get_input_at(0)
@@ -81,12 +81,7 @@ def update_base_outputs(model_base,output_shape,optparam,hidden_type='fc'):
         if hidden_layer:
             outputs = hidden_layer(outputs) 
         preds = output_layer(outputs)
-        model = Model(inputs=inputs, outputs=preds)
-        #model = Sequential()
-        #model.add(model_base)        
-        #if hidden_layer:
-        #    model.add(hidden_layer)
-        #model.add(output_layer)        
+        model = KerasModel(inputs=inputs, outputs=preds)
 
     model.n_base_layers = len(model_base.layers)
     model.n_top_layers = len(model.layers)-model.n_base_layers
@@ -125,7 +120,7 @@ def model_init(model_base, model_flavor, state_dir, optparam, **params):
         optimparams['epsilon']=optparam['tol']        
     elif optclass=='SGD':
         from keras.optimizers import SGD as Optimizer
-        optkeys = ['momentum', 'weight_decay','decay','nesterov']        
+        optkeys = ['momentum','decay','nesterov']        
     elif optclass=='SGDW':
         from SGDW import SGDW as Optimizer
         optkeys = ['momentum', 'weight_decay','decay','nesterov']
