@@ -11,6 +11,15 @@ from socket import gethostname as hostname
 from os.path import abspath, expanduser, splitext, islink
 from os.path import join as pathjoin, split as pathsplit, exists as pathexists 
 
+from progressbar import ProgressBar, Bar, UnknownLength
+from progressbar import Percentage, Counter, ETA
+
+from sklearn.metrics import precision_recall_fscore_support as _prfs
+from sklearn.metrics import roc_curve
+
+
+_DEG2RAD = np.pi/180.0
+
 def filename(path):
     '''
     /path/to/file.ext -> file.ext
@@ -33,8 +42,8 @@ isdir      = os.path.isdir
 mkdir = os.makedirs
 mkdirs = mkdir
 
-TP_ROOT_DIR=dirname(__file__)
-print('TP_ROOT_DIR: "%s"'%str((TP_ROOT_DIR)))
+TP_ROOT_DIR=os.getenv('TP_ROOT_DIR',dirname(__file__))
+#print('TP_ROOT_DIR: "%s"'%str((TP_ROOT_DIR)))
 
 gettime = time.time
 
@@ -49,7 +58,7 @@ if not pathexists(TP_EXT_DIR):
     warn('TP_EXT_DIR="%s" not found, exiting'%TP_EXT_DIR)
     sys.exit(1)
 
-print('TP_EXT_DIR: "%s"'%str((TP_EXT_DIR)))    
+#print('TP_EXT_DIR: "%s"'%str((TP_EXT_DIR)))    
 for lib_id in TP_EXT_LIB:
     lib_dir = pathjoin(TP_EXT_DIR,lib_id)
     if not pathexists(lib_dir):
@@ -81,7 +90,9 @@ for lib_id in TP_EXT_LIB:
 #sys.path.insert(0,pathjoin(pyext,'imgaug')) 
 
 from LatLongUTMconversion import UTMtoLL
-from extract_patches_2d import *
+import extract_patches_2d as _extract_patches_2d
+
+extract_patches_2d = _extract_patches_2d.extract_patches_2d
 
 random_state = 42
 image_ext = '.png'
@@ -140,6 +151,32 @@ def save_json(jsonf,outdict,**kwargs):
     with open(jsonf,'w') as fid:
         print(json.dumps(outdict,**kwargs),file=fid)
 
+
+def loadmat(matf,**kwargs):
+    from scipy.io import loadmat as _loadmat
+    kwargs.setdefault('verify_compressed_data_integrity',True)
+    kwargs.setdefault('squeeze_me',True)
+    verbose = kwargs.pop('verbose',True)
+    if verbose:
+        print('loading',matf)    
+    return _loadmat(matf,**kwargs)
+
+def savemat(dumpf,objd,**kwargs):
+    from scipy.io import savemat as _savemat
+    if not isinstance(dumpf,str) or not isinstance(objd,dict):
+        print('swapping argument order')
+        dumpfile,objdict = objd,dumpf
+    else:
+        dumpfile,objdict = dumpf,objd
+    verbose = kwargs.pop('verbose',True)
+    kwargs.setdefault('format','5')
+    kwargs.setdefault('do_compression',True)
+    if kwargs.pop('overwrite',False) or not pathexists(dumpfile):
+        if verbose:
+            print('saving',dumpfile)        
+        return _savemat(dumpfile,objdict,**kwargs)
+    print('file %s not written'%dumpfile)
+        
 def arraymap(func,a,axis=-1):
     return np.apply_along_axis(func,axis,a)
     
@@ -308,15 +345,19 @@ def sl2xy(s,l,**kwargs):
 def collect_region_tiles(idata,iregs,regkeep,tile_dim,nmax=None,nmin=1,
                          min_pix=1,min_lab=1,verbose=0):
     # idata: [n x m x l] image, first (l-1) bands = data
-    #        last band assumed to be ccomp of user labels
+    #        last band assumed to be conncomp of user labels
     # ireg:  [n x m x 1] image of region labels 
     #        region labels \in [min(regkeep),max(regkeep)]
+    # regkeep: list of region ids to keep
+    # tile_dim: dimention of square tile
+    # nmax: max tiles to collect per region
+    # nmin: min tiles to collect per region
     # min_pix = minimum number or percentage of pixels in tile 
     # min_lab = minimum number or percentage of labeled pixels in tile
-    min_pix = min_pix
     if min_pix > 0.0 and min_pix < 1.0:
         min_pix = max(1,int(np.ceil(min_pix*(tile_dim**2))))
 
+    nmax = nmax or tile_dim**2
     ireg = iregs.squeeze()
     Xtiles,ytiles = np.array([]),np.array([])
     idxtiles,labtiles = np.array([]),np.array([])
@@ -347,16 +388,18 @@ def collect_region_tiles(idata,iregs,regkeep,tile_dim,nmax=None,nmin=1,
             ijmin = min(imax-imin,jmax-jmin)
 
         if verbose:
-            print('ijmin %d, tile_dim %d'%(ijmin,tile_dim),
+            print('region %d of %d'%(lj,len(regkeep)),
+                  'ijmin %d, tile_dim %d'%(ijmin,tile_dim),
                   'imin,jmin:',imin,jmin,
                   'imax,jmax:',imax,jmax,
                   'idata.shape:',idata.shape)
 
-        #  NOTE (BDB, 03/04/18): this may index oob if cmff not zero padded 
+        #  NOTE (BDB, 03/04/18): this may index oob if idata not zero padded 
         idatalj = extract_tile(idata,(imin,jmin),ijmin+1)
 
         # pick positive tiles according to dims of label region
-        ntj = nmax if nmax else max(nmin,int(np.ceil(max(idatalj.shape[:2])/tile_dim)))
+        ntj = max(nmin,int(np.ceil(max(idatalj.shape[:2])/tile_dim)))
+        ntj = min(nmax,ntj)
         tilesj,idxtilesj = extract_patches_2d(idatalj, tile_size, ntj,
                                               return_index=True)
         pixj,pixlabsj = tilesj[...,:-1],tilesj[...,-1]
@@ -376,6 +419,9 @@ def collect_region_tiles(idata,iregs,regkeep,tile_dim,nmax=None,nmin=1,
 
         labsj = nlabsj >= min_labj
 
+        # update idxtilesj to use the absolute offset into idata
+        idxtilesj += [imin,jmin]
+        
         # append to positive output lists
         if len(Xtiles)!=0:
             Xtiles = np.r_[Xtiles,pixj]
@@ -398,7 +444,6 @@ def collect_tile_uls(tile_path,tile_id='det',tile_ext='.png'):
     Arguments:
     - imgid: base image for precomputed tiles
     - tile_dir: base tile directory, must be of the form:
-    
         tile_path = tile_dir/tile_dim/imgid/tile_prefix
     
       ...and must contain filenames of the form:
@@ -489,7 +534,8 @@ def collect_image_uls(img_test,tile_dim,tile_stride):
     
     return uls
 
-def extract_tile(img,ul,tdim,transpose=None,cval=0,verbose=False):
+def extract_tile(img,ul,tdim,transpose=None,cval=0,require_square=True,
+                 verbose=False):
     '''
     extract a tile of dims (tdim,tdim,img.shape[2]) offset from upper-left 
     coordinate ul in img, zero pads when tile overlaps image extent 
@@ -501,7 +547,7 @@ def extract_tile(img,ul,tdim,transpose=None,cval=0,verbose=False):
         nr,nc = img.shape
         nb = 1
     else:
-        raise Exception('invalid number of image dims %d'%ndim)
+        raise Exception('img.ndim=%d invalid'%ndim)
     
     lr = (ul[0]+tdim,ul[1]+tdim)
     padt,padb = abs(max(0,-ul[0])), tdim-max(0,lr[0]-nr)
@@ -510,10 +556,13 @@ def extract_tile(img,ul,tdim,transpose=None,cval=0,verbose=False):
     ibeg,iend = max(0,ul[0]),min(nr,lr[0])
     jbeg,jend = max(0,ul[1]),min(nc,lr[1])
 
+    if require_square and (((ibeg<0) or (jbeg<0) or (iend>nr) or (jend>nc))):
+        raise Exception("Tile not square")
+    
     if verbose:
-        print(ul,nr,nc)
-        print(padt,padb,padl,padr)
-        print(ibeg,iend,jbeg,jend)
+        print('ul,nr,nc:',ul,nr,nc)
+        print('padt,padb,padl,padr:',padt,padb,padl,padr)
+        print('ibeg,iend,jbeg,jend:',ibeg,iend,jbeg,jend)
 
     imgtile = cval*np.ones([tdim,tdim,nb],dtype=img.dtype)
     imgtile[padt:padb,padl:padr] = np.atleast_3d(img[ibeg:iend,jbeg:jend])
@@ -601,8 +650,6 @@ def progressbar(caption,maxval=None):
     - progress bar instance (pbar.update(i) to step, pbar.finish() to close)
     """
     
-    from progressbar import ProgressBar, Bar, UnknownLength
-    from progressbar import Percentage, Counter, ETA
 
     capstr = caption + ': ' if caption else ''
     if maxval is not None:    
@@ -672,7 +719,6 @@ def compute_predictions(model,X_test):
     return dict(pred_outs=pred_outs,pred_labs=pred_labs,pred_prob=pred_prob)
 
 def compute_metrics(test_lab,pred_lab,pos_label=1,average='binary',asdict=True):
-    from sklearn.metrics import precision_recall_fscore_support as _prfs
     assert((test_lab.ndim==1) and (pred_lab.ndim==1))
     prf = _prfs(test_lab,pred_lab,average=average,pos_label=pos_label)[:-1]
     if asdict:
@@ -683,7 +729,6 @@ def fnrfpr(test_lab,prob_pos,fnratfpr=None,verbose=0):
     assert((test_lab.ndim==1) and (prob_pos.ndim==1))
 
     from scipy import interp
-    from sklearn.metrics import roc_curve
     fprs, tprs, thresholds = roc_curve(test_lab, prob_pos)
     fnrs = 1.0-tprs
     optidx = np.argmin(fprs+fnrs)
@@ -744,8 +789,9 @@ def write_predictions(predf, test_ids, test_lab, pred_lab, pred_prob,
     n_acc,n_err = n_tp+n_tn, n_fp+n_fn
     n_pos,n_neg = n_tp+n_fn, n_tn+n_fp
     outstr = [
-        '# argv=%s, pid=%d'%(' '.join(sys.argv),os.getpid()),
-        '# %d samples: # %d correct, %d errors'%(n_lab,n_acc,n_err),
+        '# pid=%d, cwd=%s'%(os.getpid(),os.getcwd()),
+        '# argv=%s'%(' '.join(sys.argv)),
+        '# %d samples: %d correct, %d errors'%(n_lab,n_acc,n_err),
         '# [tp=%d+fn=%d]=%d positive'%(n_tp,n_fn,n_pos) + \
         ', [tn=%d+fp=%d]=%d negative'%(n_tn,n_fp,n_neg),
         '# %s'%mstr, '#', '# id lab pred prob'
@@ -830,9 +876,13 @@ def imread_rgb(f,dtype=np.uint8,plugin=None,verbose=0):
 
 def resize_tile(tile,tile_shape=[],crop_shape=[],resize='resize',
                 pad_tile=True,dtype=np.uint8,verbose=0):
-    assert(len(tile_shape)==2)
+
+    
+    assert(len(tile_shape)!=0 or len(crop_shape)!=0)
+    if len(tile_shape)==0:
+        tile_shape = crop_shape
     if len(crop_shape)==0:
-        crop_shape = tile_shape
+        crop_shape = tile_shape        
 
     if pad_tile and tile.shape[0] != tile.shape[1]:
         max_dim = max(tile_shape[:2])
@@ -877,6 +927,14 @@ def resize_tile(tile,tile_shape=[],crop_shape=[],resize='resize',
         # center crop
         tile = imcrop(tile,crop_shape)
 
+    elif resize=='random_crop':
+        rowoff,coloff = 0,0
+        if tile_shape[0]>crop_shape[0]:
+            rowoff = np.random.randint(tile.shape[0]-crop_shape[0])
+        if tile_shape[1]>crop_shape[1]:
+            coloff = np.random.randint(tile.shape[1]-crop_shape[1])
+        tile = imcrop(tile[rowoff:,coloff:],crop_shape)
+        
     elif resize=='zoom_crop':
         # resize to crop_shape, then crop to tile_shape
         # crop_shape must be >= tile_shape
@@ -928,9 +986,9 @@ def envitypecode(np_dtype):
 
 def mapdict2str(mapinfo):
     mapmeta = mapinfo.pop('metadata',[])
-    mapkeys,mapvals = mapinfo.keys(),mapinfo.values()
+    mapkeys,mapvals = list(mapinfo.keys()),list(mapinfo.values())
     nargs = 10 if mapinfo['proj']=='UTM' else 7
-    maplist = map(str,mapvals[:nargs])
+    maplist = list(map(str,mapvals[:nargs]))
     mapkw = zip(mapkeys[nargs:],mapvals[nargs:])
     mapkw = [str(k)+'='+str(v) for k,v in mapkw]
     mapstr = '{ '+(', '.join(maplist+mapkw+mapmeta))+' }'
@@ -1196,19 +1254,19 @@ def fill_batch(X_batch,y_batch,batch_size,balance=True):
 
     batch_lab = to_binary(y_batch)
     if len(np.unique(batch_lab))==1:
-        return X_batch, y_batch
+        return np.array([0],dtype=np.int)
     n_cur = len(y_batch)
     n_aug = batch_size-n_cur
     if n_aug <= 0:
         warn('len(X_batch) <= batch_size, nothing to fill')
-        return [],[]
-    aug_idx = np.uint64(randperm(batch_size) % n_cur)
+        return np.array([],dtype=np.int)
+    aug_idx = np.array(randperm(batch_size),dtype=np.int) % n_cur
     if balance:
         bal_idx = balance_classes(batch_lab[aug_idx],verbose=False)        
         if len(bal_idx)!=0:
             aug_idx = np.r_[aug_idx[bal_idx],aug_idx]
     aug_idx = aug_idx[randperm(len(aug_idx),n_aug)]
-    return aug_idx #X_batch[aug_idx], y_batch[aug_idx]
+    return np.array(aug_idx,dtype=np.int) #X_batch[aug_idx], y_batch[aug_idx]
 
 class threadsafe_iter:
     """
@@ -1302,6 +1360,42 @@ def image2tiles(I,tdim,ngen,keepmask=[],skipmask=[]):
         if ((ij+1)%ngen) == 0:
             yield ti
 
+def image_pad(img_data,tile_dim,tile_stride):
+    img_padded = img_data.copy()
+    if img_data.ndim == 3:
+        rows,cols,bands = img_data.shape
+    else:
+        rows,cols = img_data.shape
+        bands = 1
+        
+    img_dtype = img_data.dtype
+
+    # pad to fit into (modulo tile_stride) and (modulo tile_dim) increments
+    print('image rows,cols:  "%s"'%str((rows,cols)))
+    cadd = tile_stride-(cols%tile_stride)
+    radd = tile_stride-(rows%tile_stride)
+    cadd += tile_dim-(cols+cadd)%tile_dim
+    radd += tile_dim-(rows+radd)%tile_dim
+
+    # add 1 more tile_dim to prevent edge effects
+    #cadd += tile_dim
+    #radd += tile_dim
+    
+    if cadd > 0:
+        csbuf = np.zeros([rows,tile_dim,bands],dtype=img_dtype)
+        cebuf = np.zeros([rows,cadd,bands],dtype=img_dtype)
+        img_padded = np.hstack([csbuf,img_padded,cebuf])
+        cols += tile_dim+cadd
+        
+    if radd > 0:
+        rsbuf = np.zeros([tile_dim,cols,bands],dtype=img_dtype)
+        rebuf = np.zeros([radd,cols,bands],dtype=img_dtype)
+        img_padded = np.vstack([rsbuf,img_padded,rebuf])
+        rows += tile_dim+radd
+
+    print('padded rows,cols: "%s"'%str((rows,cols)))
+    print('img_padded.shape: "%s"'%str((img_padded.shape)))
+    return img_padded,radd,cadd            
 
         
 if __name__ == '__main__':
