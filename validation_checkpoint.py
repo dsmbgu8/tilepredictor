@@ -11,7 +11,7 @@ def keras_callback():
     
 class ValidationCheckpoint(keras_callback()):
     def __init__(self,val_monitor='val_loss',model_dir=None,mode='auto',
-                 test_ids=[],test_period=1,save_period=None,initial_epoch=0,
+                 test_ids=[],test_period=1,save_period=0,initial_epoch=0,
                  initial_monitor=None,warmup_epoch=5,max_vanish=5,
                  save_best_model=True,save_best_preds=True,
                  pid=None,verbose=0):
@@ -269,6 +269,8 @@ class ValidationCheckpoint(keras_callback()):
                     self.debug_epoch = 0
 
             val_epoch = np.float32(logs[self.val_monitor])
+            if val_epoch != val_epoch:
+                print('\n\nself.model.evaluate(test_data,test_labs): "%s"\n\n'%str((self.model.evaluate(test_data,test_labs))))
             self.val_log.append(val_epoch)
             mstr = ['%s=%9.6f'%(self.val_monitor,val_epoch)]
             pred_metrics = compute_metrics(test_labs,self.pred_labs)
