@@ -8,9 +8,11 @@ from model_package import *
 
 from windowsequence import WindowSequence
 
+
 default_load_func = 'tilepredictor_util.imread_rgb'
 
 batch_size = 32
+batch_max = 480
 n_epochs = 2000
 n_batches = n_epochs//batch_size
 
@@ -213,6 +215,7 @@ def write_csv(csvf,imgid,pred_list,prob_thresh=0.75,img_map=None):
         fid.write('\n'.join(['# '+', '.join(header)]+list(outcsv))+'\n')
     print('saved',csvf) 
 
+
 def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
                    preprocess=None, img_map=None, backend='tensorflow',
                    lab_mask=[], verbose=0, transpose=False, print_status=True,
@@ -221,7 +224,7 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
 
     input_shape = model.layers[0].input_shape
 
-    if backend=='tensorflow':
+    if backend=='tensorflow' or backend.startswith('plaidml.keras'):
         # channels last
         tile_dim,tile_bands = input_shape[2],input_shape[3]
         tile_transpose = [0,1,2]
@@ -237,40 +240,17 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     else:
         stride = max(1,(tile_stride*tile_dim))
     stride = int(stride)
-    
-    img_test = (img_data.transpose((1,0,2)) if transpose else img_data).copy()
-    img_dtype = img_data.dtype
+
+    img_test = img_data.transpose((1,0,2)) if transpose else img_data
+    img_test,radd,cadd = image_pad(img_test,tile_dim,stride)
     rows,cols,bands = img_test.shape
-
-    # pad to fit into (modulo stride) and (modulo tile_dim) increments
-    print('image rows,cols:  "%s"'%str((rows,cols)))
-    cadd = stride-(cols%stride)
-    radd = stride-(rows%stride)
-    cadd += tile_dim-(cols+cadd)%tile_dim
-    radd += tile_dim-(rows+radd)%tile_dim
-
-    # add 1 more tile_dim to prevent edge effects
-    #cadd += tile_dim
-    #radd += tile_dim
-    
-    if cadd > 0:
-        csbuf = np.zeros([rows,tile_dim,bands],dtype=img_dtype)
-        cebuf = np.zeros([rows,cadd,bands],dtype=img_dtype)
-        img_test = np.hstack([csbuf,img_test,cebuf])
-        cols += tile_dim+cadd
-        
-    if radd > 0:
-        rsbuf = np.zeros([tile_dim,cols,bands],dtype=img_dtype)
-        rebuf = np.zeros([radd,cols,bands],dtype=img_dtype)
-        img_test = np.vstack([rsbuf,img_test,rebuf])
-        rows += tile_dim+radd
-
-    print('padded rows,cols: "%s"'%str((rows,cols)))
         
     # need to copy the rgb bands so view_as_windows will work(?)
     img_rgb = img_test[...,:3].copy()
     img_mask = np.zeros([rows,cols],dtype=np.bool8)
-    if bands==4:        
+
+    if bands==4:
+        # add zero alphas to mask, drop alpha band
         img_mask[img_test[...,-1]==0] = 1
         bands = 3
         
@@ -286,10 +266,10 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     rrange = np.arange(0,rows-tile_dim+1,stride)
     crange = np.arange(0,cols-tile_dim+1,stride)
     n_rb,n_cb = len(rrange),len(crange)
-    cb_den = max(1,n_cb // 1000)
-    batch_size = max(2*(n_cb//2),int(np.sqrt(n_cb))**2)//cb_den
+    cb_den = max(1,n_cb//500)
 
-    batch_size = min(batch_size,480)
+    batch_size = max(2*(n_cb//2),int(np.sqrt(n_cb))**2)//cb_den
+    batch_size = min(batch_size,batch_max)
     
     pmsg = 'Collecting predictions'
     print(pmsg+', size = %d x %d tiles (tile_dim=%d, stride=%d)'%(n_rb,
@@ -304,17 +284,17 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     inittime = gettime()
     preptime,predtime,posttime = 0.,0.,0.
     pbar = progressbar(pmsg,n_rb)
-    
-    img0 = preprocess_img_u8(np.zeros([1,tile_dim,tile_dim,3],dtype=np.uint8))
-    prob0 = model.predict(img0.transpose(rtranspose))
-    pred0 = np.int8(to_binary(prob0))
-    img05 = preprocess_img_u8((255/2.0)*np.ones([1,tile_dim,tile_dim,3],dtype=np.uint8))
-    prob05 = model.predict(img05.transpose(rtranspose))
-    img1 = preprocess_img_u8(255*np.ones([1,tile_dim,tile_dim,3],dtype=np.uint8))
-    prob1 = model.predict(img1.transpose(rtranspose))
-    print('prob(X = [0.0]_%dx%d) = '%(tile_dim,tile_dim),prob0)
-    print('prob(X = [0.5]_%dx%d) = '%(tile_dim,tile_dim),prob05)
-    print('prob(X = [1.0]_%dx%d) = '%(tile_dim,tile_dim),prob1)
+
+    sanity_check = True
+    img_u8 = 255*np.ones([1,tile_dim,tile_dim,3],dtype=np.uint8)
+    gray_thr = [0.0,0.1,0.5,1.0] if sanity_check else [0.0]
+    for thr in gray_thr:
+        imgthr = preprocess_img_u8(np.uint8(thr*img_u8))
+        probthr = model.predict(imgthr.transpose(rtranspose))
+        if thr==0.0:
+            prob0p0 = probthr
+            pred0p0 = to_binary(prob0p0)
+        print('prob(X = [%.2f]_%dx%d) = '%(thr,tile_dim,tile_dim),probthr)
     
 
     for l in model.layers:
@@ -368,8 +348,9 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
             
 
     use_mp = False
-    n_workers = 5 if use_mp else 1
-    predictkw = dict(max_queue_size=10,workers=n_workers,use_multiprocessing=use_mp)
+    n_workers = 5
+    predictkw = dict(max_queue_size=5000,workers=n_workers,
+                     use_multiprocessing=use_mp)
                 
     #ntiles = len(rrange)*len(crange)
     #ntgen = tile_gen(img_rgb,tile_dim,stride,rtranspose)
@@ -377,8 +358,8 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     #rprob = model.predict_generator(ntgen,ntiles,**predictkw)
     #print(rprob), raw_input()
     
-    use_npi = False 
-    use_seq = False
+    use_npi = False
+    use_seq = True
 
     if use_npi:
         _imggen = ImageDataGenerator()
@@ -387,40 +368,54 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
         #preptime = gettime()
         rend = rbeg+tile_dim
         #img_row = img_rgb[rbeg:rend]
-        rwin = view_as_windows(img_rgb[rbeg:rend], tshape)        
+        rwin = view_as_windows(img_rgb[rbeg:rend], tshape)
+        
         rwin = rwin.reshape(rshape)
         rwin = rwin[::stride]
         
         # only keep tiles that contain nonzero values
         rmask[:] = rwin.any(axis=tuple(range(1,rwin.ndim)))
         nkeep = np.count_nonzero(rmask)
+        
+        nbatch = nkeep//batch_size
+        rpad = batch_size - (nkeep % batch_size)
+        
         if nkeep!=0:
             #nkeepb = batch_size*((nkeep//batch_size)+1
             rshapei = [nkeep,tile_dim,tile_dim,3]
-            rinput = preprocess(rwin[rmask].copy().reshape(rshapei))
+            rinput = preprocess(rwin[rmask].copy().reshape(rshapei)) # @profile = 14%
             rinput = rinput.transpose(rtranspose)
+
+            if rpad!=0:
+                rpadimg = np.zeros([rpad,tile_dim,tile_dim,3],dtype=rinput.dtype)            
+                rinput = np.r_[rinput,rpadimg]
+                nbatch += 1
+            #print('rinput.shape: "%s"'%str((rinput.shape)))
+            #print('nkeep mod batch_size: "%s"'%str((rpad)))
             # preptime += (gettime()-preptime)
             # predtime = gettime()
             # probi = [nkeep,2] softmax class probabilities
 
-            nbatch = nkeep//batch_size
+            rprob = np.zeros([nkeep,2])
+            #print('nkeep,nbatch: "%s"'%str((nkeep,nbatch)))
             if use_npi:
                 ry = np.zeros(rinput.shape[0])
                 rinput_npi = NumpyArrayIterator(rinput, ry, _imggen,
                                                 batch_size=batch_size,
                                                 shuffle=False, seed=42)
-                rprob = model.predict_generator(rinput_npi,nbatch,**predictkw)
+                rprob[:] = model.predict_generator(rinput_npi,nbatch,
+                                                   **predictkw)[:nkeep]
+                
             elif use_seq:
                 rinput_seq = WindowSequence(rinput,batch_size) 
-                rprob = model.predict_generator(rinput_seq,nbatch,**predictkw)
+                rprob[:] = model.predict_generator(rinput_seq,nbatch,
+                                                 **predictkw)[:nkeep]
             else:
-                rprob = np.zeros([nkeep,2])
                 for bj in range(nbatch+1):
                     js,je = bj*batch_size,(bj+1)*batch_size
                     js,je = min(nkeep-1,js),min(nkeep,je)
-                    rprob[js:je]=model_predict([rinput[js:je],0])[0]            
-
-
+                    rprob[js:je]=model_predict([rinput[js:je],0])[0] # @profile = 68%        
+            
             rpred = np.int8(to_binary(rprob))
             # predtime += (gettime()-predtime)
             # predi = [nkeep,1] softmax class predictions
@@ -446,7 +441,7 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
         tile_off = (tile_dim//2)
         for j,cbeg in enumerate(crange):
             cend = cbeg+tile_dim
-            if rmask[j]:
+            if rmask[j]: # @profile = 11%
                 img_prob[rbeg:rend,cbeg:cend,:] += rprob[pj]
                 img_pred[rbeg:rend,cbeg:cend,rpred[pj]] += 1
                 if pred_thr==0:
@@ -455,11 +450,11 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
                 pj+=1
             else:
                 # already know pred + prob for null entries
-                img_prob[rbeg:rend,cbeg:cend,:] += prob0[0]
-                img_pred[rbeg:rend,cbeg:cend,pred0] += 1
+                img_prob[rbeg:rend,cbeg:cend,:] += prob0p0[0]
+                img_pred[rbeg:rend,cbeg:cend,pred0p0] += 1
                 if pred_thr==0:
                     roff,coff = rbeg+tile_off,cbeg+tile_off
-                    pred_list.append([roff,coff,prob0[0,1]])  
+                    pred_list.append([roff,coff,prob0p0[0,1]])  
 
         #posttime += (gettime()-posttime)
 
@@ -558,6 +553,7 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
 if __name__ == '__main__':
     import load_data
 
+
     import argparse
     parser = argparse.ArgumentParser(description="Tile Predictor")
 
@@ -604,14 +600,19 @@ if __name__ == '__main__':
                         help="Total number of training epochs (default=%d)"%n_epochs)
     parser.add_argument("--test_period", type=int, default=test_period,
                         help="Epochs between testing (default=%d)"%test_period)
+
     parser.add_argument("--test_percent",type=float, default=0.2,
                         help="Percentage of test data to use during validation")
+    parser.add_argument("--lr_scalef",type=float, default=None,
+                        help="Scaling factor for CLR init/max learning rate (default=determined by model)")
     parser.add_argument("--stop_early", type=int, 
                         help="Epochs to consider for early stopping (default=epochs)")
     parser.add_argument("--save_period", type=int, 
                         help="Epochs between periodic save cycles (default=None)")
     parser.add_argument("--save_test", action='store_true',
                        help="Write test data/labels to .npy files after loading")
+    parser.add_argument("--save_imed", action='store_true',
+                       help="Write intermediate image files")
     parser.add_argument("--conserve_memory", action='store_true',
                         help="Conserve memory by not caching train/test tiles'")
     parser.add_argument("--balance", action='store_true',
@@ -656,13 +657,19 @@ if __name__ == '__main__':
 
     parser.add_argument("-v", "--verbose", action='store_true',
                         help="Enable verbose output")
-    
-    parser.add_argument("image_load_pattern", type=str, default=load_pattern,
+
+    parser.add_argument("--profile", action='store_true',
+                        help="Enable line profiler")
+
+    parser.add_argument("--image_load_pattern", type=str, default=load_pattern,
                         help="Load pattern for input/test images(s) (default=%s)"%load_pattern)
     
 
-    
     args = parser.parse_args(sys.argv[1:])
+    if args.profile:
+        import line_profiler
+        profile = line_profiler.LineProfiler(image_salience)
+
     model_weightf = args.weight_file
     train_file    = args.train_file
 
@@ -675,7 +682,7 @@ if __name__ == '__main__':
     model_flavor  = args.model_flavor
     
     tile_dim      = args.tile_dim
-    crop_dim      = args.crop_dim or tile_dim
+    crop_dim      = args.crop_dim
     batch_size    = args.batch_size
     test_file     = args.test_file
 
@@ -685,6 +692,7 @@ if __name__ == '__main__':
     test_period   = args.test_period
     test_percent  = args.test_percent
     save_period   = args.save_period
+    save_imed     = args.save_imed
     conserve_mem  = args.conserve_memory
     save_test     = args.save_test
     balance_train = args.balance
@@ -716,6 +724,8 @@ if __name__ == '__main__':
 
     label_dir     = args.label_dir
     label_pattern = args.label_load_pattern
+
+    lr_scalef     = args.lr_scalef
     
     verbose       = args.verbose
     clobber       = args.clobber
@@ -742,7 +752,8 @@ if __name__ == '__main__':
                           model_flavor=model_flavor,
                           model_package=model_package,
                           model_weightf=model_weightf,
-                          num_gpus=num_gpus)
+                          num_gpus=num_gpus,
+                          lr_scalef=lr_scalef)
 
     print('module_func: "%s"'%str((module_func)))
     load_func = load_data.import_load_func(module_func)
