@@ -10,3 +10,7 @@ def cmf2rgb_load_func_250_4000(cmff):
 def cmf2rgb_load_func_100_6000(cmff):
     ppmm_min,ppmm_max = 100,6000
     return convert_cmf_image(cmff,ppmm_min,ppmm_max)
+
+def cmf2rgb_load_func_250_1250(cmff):
+    ppmm_min,ppmm_max = 250,1250
+    return convert_cmf_image(cmff,ppmm_min,ppmm_max)
