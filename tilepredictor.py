@@ -223,10 +223,13 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     from skimage.util.shape import view_as_windows
 
     input_shape = model.layers[0].input_shape
-
+    if len(input_shape)==1:
+        input_shape = input_shape[0]
+    
+    print('input_shape: "%s"'%str((input_shape)))
     if backend=='tensorflow' or backend.startswith('plaidml.keras'):
         # channels last
-        tile_dim,tile_bands = input_shape[2],input_shape[3]
+        tile_dim,tile_bands = input_shape[-2],input_shape[-1]
         tile_transpose = [0,1,2]
     elif backend=='theano':
         # channels first
@@ -302,8 +305,8 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
     
     from keras import backend as K
     from keras.preprocessing.image import ImageDataGenerator, NumpyArrayIterator
-    model_predict = K.function([model.input, K.learning_phase()],
-                               [model.output])
+    #model_predict = K.function([model.input, K.learning_phase()],
+    #                           [model.output])
 
     #predict_generator(generator, steps=None, max_queue_size=10, workers=1, use_multiprocessing=False, verbose=0)
 
@@ -414,7 +417,7 @@ def image_salience(model, img_data, tile_stride, output_dir, output_prefix,
                 for bj in range(nbatch+1):
                     js,je = bj*batch_size,(bj+1)*batch_size
                     js,je = min(nkeep-1,js),min(nkeep,je)
-                    rprob[js:je]=model_predict([rinput[js:je],0])[0] # @profile = 68%        
+                    rprob[js:je]=model.predict([rinput[js:je],0])[0] # @profile = 68%        
             
             rpred = np.int8(to_binary(rprob))
             # predtime += (gettime()-predtime)
